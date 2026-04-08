@@ -1,0 +1,9 @@
+*.exe
+*.pem
+*.key
+.env*
+disk/
+artifact/**/*.json
+artifact/**/*.diff
+.idea/
+.vscode/
