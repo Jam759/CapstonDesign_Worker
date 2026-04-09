@@ -265,7 +265,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 			questStep.Fail(err)
 			logger.Warn(ctx, "failed to generate quests", slog.String("reason", err.Error()))
 		} else {
-			result.CompleteQuestIDs, result.NewQuestIDs = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, msg.PushUserID, questResp)
+			result.CompleteQuestIDs, result.NewQuestIDs = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, msg.PushUserID, questReq, questResp)
 			questStep.Complete(
 				slog.Int("completedQuestCount", len(result.CompleteQuestIDs)),
 				slog.Int("newQuestCount", len(result.NewQuestIDs)),

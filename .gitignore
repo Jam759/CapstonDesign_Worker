@@ -8,5 +8,7 @@ artifact/**/*.diff
 .idea/
 .vscode/
 
+.gocache
+.claude
 .logs
 .docs

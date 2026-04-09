@@ -111,16 +111,41 @@ func GenerateAndEvaluateQuests(ctx context.Context, projCtxPath string, request 
 	return &response, nil
 }
 
+func knownQuestIDSet(request QuestRequest) map[int64]struct{} {
+	ids := make(map[int64]struct{}, len(request.Quests))
+	for _, q := range request.Quests {
+		if q.UserAiQuestID <= 0 {
+			continue
+		}
+		ids[q.UserAiQuestID] = struct{}{}
+	}
+	return ids
+}
+
 // SaveResults는 quest 평가 결과와 신규 퀘스트를 DB에 저장하고, 완료된 퀘스트 ID와 신규 퀘스트 ID를 반환합니다.
-func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64, resp *QuestResponse) (completedIDs []int64, newQuestIDs []int64) {
+func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64, request QuestRequest, resp *QuestResponse) (completedIDs []int64, newQuestIDs []int64) {
 	completedIDs = make([]int64, 0)
 	newQuestIDs = make([]int64, 0)
+	knownQuestIDs := knownQuestIDSet(request)
+	savedEvaluationCount := 0
+	skippedEvaluationCount := 0
 
 	for _, eval := range resp.QuestEvaluations {
+		if _, ok := knownQuestIDs[eval.UserAiQuestID]; !ok {
+			skippedEvaluationCount++
+			logger.Warn(ctx, "skipping quest evaluation for unknown quest id",
+				slog.Int64("questId", eval.UserAiQuestID),
+				slog.Int64("jobId", jobID),
+			)
+			continue
+		}
+
 		if err := db.InsertQuestEvaluation(eval.UserAiQuestID, jobID, eval.EvaluationResult, eval.ConfidenceScore, eval.Reason, eval.ProgressNote); err != nil {
 			logger.Error(ctx, "failed to insert quest evaluation", err, slog.Int64("questId", eval.UserAiQuestID))
 			continue
 		}
+		savedEvaluationCount++
+
 		if err := db.UpdateQuestLastEvaluatedAt(eval.UserAiQuestID); err != nil {
 			logger.Warn(ctx, "failed to update quest last_evaluated_at",
 				slog.Int64("questId", eval.UserAiQuestID),
@@ -149,8 +174,9 @@ func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64
 	}
 
 	logger.Info(ctx, "quest results saved",
-		slog.Int("evaluations", len(resp.QuestEvaluations)),
-		slog.Int("newQuests", len(resp.NewQuests)),
+		slog.Int("savedEvaluations", savedEvaluationCount),
+		slog.Int("skippedEvaluations", skippedEvaluationCount),
+		slog.Int("newQuests", len(newQuestIDs)),
 	)
 	return
 }

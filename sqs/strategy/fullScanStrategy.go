@@ -211,7 +211,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 			questStep.Fail(err)
 			logger.Warn(ctx, "failed to generate quests", slog.String("reason", err.Error()))
 		} else {
-			result.CompleteQuestIDs, result.NewQuestIDs = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, msg.UserID, questResp)
+			result.CompleteQuestIDs, result.NewQuestIDs = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, msg.UserID, questReq, questResp)
 			questStep.Complete(
 				slog.Int("completedQuestCount", len(result.CompleteQuestIDs)),
 				slog.Int("newQuestCount", len(result.NewQuestIDs)),
