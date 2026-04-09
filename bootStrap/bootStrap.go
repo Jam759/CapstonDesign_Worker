@@ -3,6 +3,8 @@ package bootStrap
 import (
 	"context"
 	"log"
+	"os/signal"
+	"syscall"
 	"worker_GoVer/config"
 	"worker_GoVer/db"
 	"worker_GoVer/disk"
@@ -42,10 +44,12 @@ func AppStart() {
 	}
 	log.Println("[Boot] SQS consumer created")
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	go consumer.StartAnalysisListener(ctx)
 
 	log.Println("[Boot] ready")
-	// 메인 고루틴 블로킹
-	select {}
+	<-ctx.Done()
+	log.Println("[Boot] shutdown signal received, waiting for in-flight jobs...")
 }

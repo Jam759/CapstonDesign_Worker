@@ -12,6 +12,11 @@ import (
 	"worker_GoVer/artifact/codeGraph/strategy"
 )
 
+const (
+	maxFileSizeBytes  = 2 * 1024 * 1024  // 파일당 최대 2MB
+	maxCacheSizeBytes = 100 * 1024 * 1024 // 캐시 총합 최대 100MB
+)
+
 // GenerateCodeContent는 코드 그래프의 각 노드에 대해 소스코드를 추출하여 저장합니다.
 // 반환값: 저장된 JSON 파일 경로
 func GenerateCodeContent(projectPath string, graph *strategy.CodeGraph) (string, error) {
@@ -19,13 +24,15 @@ func GenerateCodeContent(projectPath string, graph *strategy.CodeGraph) (string,
 
 	// 파일별 라인 캐시 (같은 파일을 여러 번 읽지 않도록)
 	fileCache := map[string][]string{}
+	var cacheSizeBytes int64
 
 	var contents []CodeContent
 
 	for _, node := range graph.Nodes {
-		lines, err := getFileLines(fileCache, projectPath, node.FilePath)
+		lines, err := getFileLines(fileCache, &cacheSizeBytes, projectPath, node.FilePath)
 		if err != nil {
-			continue // 파일 읽기 실패 시 스킵
+			log.Printf("[CodeContent] skip node %s: %v", node.FilePath, err)
+			continue
 		}
 
 		startIdx := node.Line - 1
@@ -79,12 +86,25 @@ func GenerateCodeContent(projectPath string, graph *strategy.CodeGraph) (string,
 	return savePath, nil
 }
 
-func getFileLines(cache map[string][]string, projectPath, relPath string) ([]string, error) {
+func getFileLines(cache map[string][]string, cacheSize *int64, projectPath, relPath string) ([]string, error) {
 	if lines, ok := cache[relPath]; ok {
 		return lines, nil
 	}
 
 	absPath := filepath.Join(projectPath, relPath)
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxFileSizeBytes {
+		return nil, fmt.Errorf("file too large (%d bytes), skipping cache", info.Size())
+	}
+	if *cacheSize+info.Size() > maxCacheSizeBytes {
+		// 캐시 한도 초과 시 캐싱 없이 직접 읽기
+		return readFileLines(absPath)
+	}
+
 	f, err := os.Open(absPath)
 	if err != nil {
 		return nil, err
@@ -101,5 +121,21 @@ func getFileLines(cache map[string][]string, projectPath, relPath string) ([]str
 	}
 
 	cache[relPath] = lines
+	*cacheSize += info.Size()
 	return lines, nil
+}
+
+func readFileLines(absPath string) ([]string, error) {
+	f, err := os.Open(absPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	return lines, scanner.Err()
 }

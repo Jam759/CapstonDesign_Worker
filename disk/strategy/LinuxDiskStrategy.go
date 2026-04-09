@@ -39,12 +39,12 @@ func (l *LinuxDiskStrategy) IsExistDir(dirPath string) (bool, error) {
 }
 
 func (l *LinuxDiskStrategy) CreateLockFileAtomic(dirPath string) (string, error) {
-	lockPath := filepath.Join(filePath, ".lock")
+	lockPath := filepath.Join(dirPath, ".lock")
 	return l.writeFileAtomic(lockPath)
 }
 
 func (l *LinuxDiskStrategy) CreateTouchFileAtomic(dirPath string) (string, error) {
-	touchPath := filepath.Join(filePath, ".touch")
+	touchPath := filepath.Join(dirPath, ".touch")
 	return l.writeFileAtomic(touchPath)
 }
 
@@ -81,7 +81,7 @@ func (l *LinuxDiskStrategy) writeFileAtomic(targetPath string) (string, error) {
 }
 
 func (l *LinuxDiskStrategy) RemoveLockAtomic(dirPath string) error {
-	lockPath := filepath.Join(filePath, ".lock")
+	lockPath := filepath.Join(dirPath, ".lock")
 	if err := os.Remove(lockPath); err != nil {
 		return fmt.Errorf("failed to remove lock file: %w", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ func GenerateProjectContext(projectPath string, graphPath string, contentPath st
 	}
 
 	// 1. 정량 메트릭 계산 (codeGraph 기반, AI 불필요)
+	log.Printf("[ProjectContext] graph loaded: language=%s nodes=%d edges=%d imports=%d", graph.Language, len(graph.Nodes), len(graph.Edges), len(graph.Imports))
 	metrics := CalculateMetrics(&graph)
 
 	// 2. codeContent 파싱
@@ -331,54 +333,23 @@ func analyzeModuleChunk(language string, mods []string, moduleNodes map[string][
 
 	responseStr = extractJSONArray(responseStr)
 
-	// AI가 fields를 string 대신 object/array로 반환할 수 있으므로 map으로 먼저 파싱
-	var rawList []map[string]any
-	if err := json.Unmarshal([]byte(responseStr), &rawList); err != nil {
-		// 완전 파싱 실패 시 fallback
-		details := make([]ModuleDetail, len(mods))
+	var details []ModuleDetail
+	if err := json.Unmarshal([]byte(responseStr), &details); err != nil {
+		// 파싱 실패 시 fallback
+		details = make([]ModuleDetail, len(mods))
 		for i, mod := range mods {
 			details[i] = ModuleDetail{Module: mod, Language: language, Summary: responseStr}
 		}
 		return details, nil
 	}
 
-	details := make([]ModuleDetail, len(rawList))
-	for i, raw := range rawList {
-		details[i] = ModuleDetail{
-			Module:           anyToString(raw["module"]),
-			Language:         language,
-			Summary:          anyToString(raw["summary"]),
-			Functions:        anyToString(raw["functions"]),
-			Types:            anyToString(raw["types"]),
-			Variables:        anyToString(raw["variables"]),
-			Imports:          anyToString(raw["imports"]),
-			Concurrency:      anyToString(raw["concurrency"]),
-			Patterns:         anyToString(raw["patterns"]),
-			Responsibilities: anyToString(raw["responsibilities"]),
-			ExternalDeps:     anyToString(raw["externalDeps"]),
-			Risks:            anyToString(raw["risks"]),
-		}
+	for i := range details {
 		if details[i].Module == "" && i < len(mods) {
 			details[i].Module = mods[i]
 		}
+		details[i].Language = language
 	}
 	return details, nil
-}
-
-// anyToString은 AI 응답 필드를 문자열로 변환합니다.
-// string이면 그대로, object/array면 JSON 직렬화하여 반환합니다.
-func anyToString(v any) string {
-	if v == nil {
-		return ""
-	}
-	if s, ok := v.(string); ok {
-		return s
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return fmt.Sprintf("%v", v)
-	}
-	return string(b)
 }
 
 // 전체 프로젝트 분석 + signals 보정 (모든 데이터 파일로 전달)
@@ -413,16 +384,98 @@ func generateOverview(details []ModuleDetail, graph *strategy.CodeGraph, metrics
 	}
 
 	responseStr = extractJSONObject(responseStr)
+	responseStr = cleanTrailingCommas(responseStr)
 
-	var parsed struct {
-		Analysis          Analysis `json:"analysis"`
-		SignalCorrections *Signals `json:"signalCorrections"`
-	}
-	if err := json.Unmarshal([]byte(responseStr), &parsed); err != nil {
+	var rawParsed map[string]any
+	if err := json.Unmarshal([]byte(responseStr), &rawParsed); err != nil {
 		return &Analysis{Overview: responseStr}, nil, nil
 	}
 
-	return &parsed.Analysis, parsed.SignalCorrections, nil
+	analysisMap, ok := rawParsed["analysis"].(map[string]any)
+	if !ok {
+		return &Analysis{Overview: responseStr}, nil, nil
+	}
+	analysis := mapToAnalysis(analysisMap)
+
+	var correctedSignals *Signals
+	if sigRaw, ok := rawParsed["signalCorrections"]; ok && sigRaw != nil {
+		if sigBytes, err := json.Marshal(sigRaw); err == nil {
+			var sig Signals
+			if err := json.Unmarshal(sigBytes, &sig); err == nil {
+				correctedSignals = &sig
+			}
+		}
+	}
+
+	return &analysis, correctedSignals, nil
+}
+
+// cleanTrailingCommas는 JSON에서 AI가 삽입하는 trailing comma를 제거합니다.
+var trailingCommaRe = regexp.MustCompile(`,\s*([}\]])`)
+
+func cleanTrailingCommas(s string) string {
+	return trailingCommaRe.ReplaceAllString(s, "$1")
+}
+
+// anyToString은 임의 값을 문자열로 변환합니다. 객체/배열은 JSON으로 직렬화합니다.
+func anyToString(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
+}
+
+// mapToAnalysis는 map[string]any를 Analysis 구조체로 변환합니다.
+// AI가 문자열 필드에 객체를 반환하는 경우에도 안전하게 처리합니다.
+func mapToAnalysis(m map[string]any) Analysis {
+	a := Analysis{
+		Overview:           anyToString(m["overview"]),
+		KeyDataModels:      anyToString(m["keyDataModels"]),
+		ModuleInteractions: anyToString(m["moduleInteractions"]),
+		CriticalPaths:      anyToString(m["criticalPaths"]),
+	}
+	if arch, ok := m["architecture"].(map[string]any); ok {
+		a.Architecture = ArchitectureInfo{
+			Summary:      anyToString(arch["summary"]),
+			Layers:       anyToString(arch["layers"]),
+			Dependencies: anyToString(arch["dependencies"]),
+			EntryPoints:  anyToString(arch["entryPoints"]),
+		}
+	}
+	if pat, ok := m["patterns"].(map[string]any); ok {
+		a.Patterns = PatternInfo{
+			Concurrency:         anyToString(pat["concurrency"]),
+			DesignPatterns:      anyToString(pat["designPatterns"]),
+			ErrorHandling:       anyToString(pat["errorHandling"]),
+			ResourceManagement:  anyToString(pat["resourceManagement"]),
+			Security:            anyToString(pat["security"]),
+			ExternalIntegration: anyToString(pat["externalIntegration"]),
+		}
+	}
+	if df, ok := m["dataFlow"].(map[string]any); ok {
+		a.DataFlow = DataFlowInfo{
+			Initialization:  anyToString(df["initialization"]),
+			MainWorkflow:    anyToString(df["mainWorkflow"]),
+			AsyncBoundaries: anyToString(df["asyncBoundaries"]),
+			DataFormats:     anyToString(df["dataFormats"]),
+		}
+	}
+	if qi, ok := m["qualityIndicators"].(map[string]any); ok {
+		a.QualityIndicators = QualityIndicators{
+			Strengths:       anyToString(qi["strengths"]),
+			Risks:           anyToString(qi["risks"]),
+			TechnicalDebt:   anyToString(qi["technicalDebt"]),
+			Maintainability: anyToString(qi["maintainability"]),
+		}
+	}
+	return a
 }
 
 // writeTempJSON은 v를 JSON으로 직렬화하여 임시 파일에 저장하고 경로를 반환합니다.
@@ -504,13 +557,31 @@ func groupNodesByModule(graph *strategy.CodeGraph) map[string][]strategy.Node {
 }
 
 func groupImportsByModule(graph *strategy.CodeGraph) map[string][]strategy.Import {
+	// filePath → package 매핑 (groupNodesByModule과 동일한 키 사용)
+	fileToPackage := map[string]string{}
+	for _, node := range graph.Nodes {
+		if _, ok := fileToPackage[node.FilePath]; !ok {
+			pkg := node.Package
+			if pkg == "" {
+				pkg = filepath.Dir(node.FilePath)
+				if pkg == "." {
+					pkg = "root"
+				}
+			}
+			fileToPackage[node.FilePath] = pkg
+		}
+	}
+
 	m := map[string][]strategy.Import{}
 	for _, imp := range graph.Imports {
-		dir := filepath.Dir(imp.FilePath)
-		if dir == "." {
-			dir = "root"
+		key := fileToPackage[imp.FilePath]
+		if key == "" {
+			key = filepath.Dir(imp.FilePath)
+			if key == "." {
+				key = "root"
+			}
 		}
-		m[dir] = append(m[dir], imp)
+		m[key] = append(m[key], imp)
 	}
 	return m
 }
@@ -518,12 +589,8 @@ func groupImportsByModule(graph *strategy.CodeGraph) map[string][]strategy.Impor
 func groupContentsByModule(contents []map[string]any) map[string][]map[string]any {
 	m := map[string][]map[string]any{}
 	for _, c := range contents {
+		// "package" 필드 우선 (groupNodesByModule과 동일한 키)
 		mod, _ := c["package"].(string)
-		if mod == "" {
-			if fileName, ok := c["fileName"].(string); ok {
-				mod = filepath.Dir(fileName)
-			}
-		}
 		if mod == "" || mod == "." {
 			mod = "root"
 		}

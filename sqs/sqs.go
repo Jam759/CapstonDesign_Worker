@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sync"
+	"time"
 	"worker_GoVer/apperrors"
 	"worker_GoVer/config"
 	"worker_GoVer/sqs/strategy"
@@ -52,6 +52,8 @@ func (c *Consumer) StartAnalysisListener(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			log.Println("[SQS] shutdown: waiting for in-flight jobs...")
+			c.wg.Wait()
 			log.Println("[SQS] analysis queue listener stopped")
 			return
 		default:
@@ -67,17 +69,19 @@ func (c *Consumer) StartAnalysisListener(ctx context.Context) {
 			continue
 		}
 
-		var wg sync.WaitGroup
 		for _, msg := range output.Messages {
 			msg := msg
-			c.sem <- struct{}{}
-			wg.Add(1)
+			c.sem <- struct{}{} // 슬롯 확보 (최대 동시 처리 수 제한)
+			c.wg.Add(1)
 			go func() {
-				defer func() { <-c.sem; wg.Done() }()
+				defer func() {
+					<-c.sem
+					c.wg.Done()
+				}()
 				c.handleAnalysisMessage(ctx, msg.Body, msg.ReceiptHandle)
 			}()
 		}
-		wg.Wait()
+		// wg.Wait() 제거 — 폴링 루프는 즉시 다음 메시지를 가져옴
 	}
 }
 
@@ -105,6 +109,24 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 		log.Printf("[SQS] failed to re-marshal data: %v", err)
 		return
 	}
+
+	// 처리 중 visibility timeout 주기적 연장 (분석 작업이 길어져도 중복 처리 방지)
+	heartbeatCtx, stopHeartbeat := context.WithCancel(ctx)
+	defer stopHeartbeat()
+	go func() {
+		ticker := time.NewTicker(4 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := c.resetMessageVisibility(ctx, c.cfg.AWSAnalysisQueueURL, receiptHandle); err != nil {
+					log.Printf("[SQS] failed to extend visibility timeout jobId=%s: %v", base.JobID, err)
+				}
+			case <-heartbeatCtx.Done():
+				return
+			}
+		}
+	}()
 
 	result, err := s.Handle(ctx, base.JobID, dataBytes)
 	if err != nil {
@@ -193,12 +215,13 @@ func (c *Consumer) deleteMessage(ctx context.Context, queueURL string, receiptHa
 	return err
 }
 
-// resetMessageVisibility는 메시지를 30초 후 재처리되도록 visibility timeout을 설정합니다.
+// resetMessageVisibility는 메시지의 visibility timeout을 5분 연장합니다.
+// 장시간 처리 중 SQS가 메시지를 재발행하여 중복 처리되는 것을 방지합니다.
 func (c *Consumer) resetMessageVisibility(ctx context.Context, queueURL string, receiptHandle *string) error {
 	_, err := c.client.ChangeMessageVisibility(ctx, &awssqs.ChangeMessageVisibilityInput{
 		QueueUrl:          aws.String(queueURL),
 		ReceiptHandle:     receiptHandle,
-		VisibilityTimeout: 30,
+		VisibilityTimeout: 300, // 5분
 	})
 	return err
 }

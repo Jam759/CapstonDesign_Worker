@@ -1,6 +1,7 @@
 package sqs
 
 import (
+	"sync"
 	"worker_GoVer/config"
 
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
@@ -17,6 +18,7 @@ type Consumer struct {
 	client *sqs.Client
 	cfg    *config.Config
 	sem    chan struct{}
+	wg     sync.WaitGroup // 진행 중인 모든 작업 추적 (graceful shutdown용)
 }
 
 // SqsBaseMessage는 SQS 메시지 공통 래퍼
