@@ -8,4 +8,5 @@ artifact/**/*.diff
 .idea/
 .vscode/
 
+.logs
 .docs
