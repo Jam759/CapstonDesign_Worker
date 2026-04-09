@@ -154,7 +154,8 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 	}
 
 	// 14. ProjectKB S3 업로드 + DB 저장
-	newKBID := projectContext.Persist(ctxPath, jobIDInt, msg.PushUserInstallationID, msg.RepositoryID, msg.ProjectID, kbVersion, cfg.AWSS3Bucket, effectiveBeforeCommit, msg.AfterCommit)
+	prevKBID := int64(latestKB.ProjectAnalysisReportsID)
+	newKBID := projectContext.Persist(ctxPath, &prevKBID, msg.PushUserInstallationID, msg.RepositoryID, msg.ProjectID, kbVersion, cfg.AWSS3Bucket, effectiveBeforeCommit, msg.AfterCommit)
 
 	result := &StrategyResult{}
 	if newKBID != 0 {
@@ -192,7 +193,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 			if uvPath, err := userView.Generate(uvInput, ctxPath, localPath); err != nil {
 				log.Printf("[NormalAnalysis] failed to generate user view (non-fatal): %v", err)
 			} else {
-				uvID := userView.Persist(uvPath, jobIDInt, msg.PushUserInstallationID, msg.RepositoryID, msg.ProjectID, uvVersion, cfg.AWSS3Bucket, effectiveBeforeCommit, msg.AfterCommit)
+				uvID := userView.Persist(uvPath, result.NewProjectKBID, msg.PushUserInstallationID, msg.RepositoryID, msg.ProjectID, uvVersion, cfg.AWSS3Bucket, effectiveBeforeCommit, msg.AfterCommit)
 				if uvID != 0 {
 					result.UserViewReportID = &uvID
 				}

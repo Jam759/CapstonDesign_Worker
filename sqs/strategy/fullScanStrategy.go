@@ -123,7 +123,7 @@ func (s FullScanStrategy) Handle(_ context.Context, jobID string, data json.RawM
 	}
 
 	// 8-1. ProjectContext S3 업로드 + DB 저장
-	newKBID := projectContext.Persist(ctxPath, jobIDInt, msg.InstallationID, msg.RepositoryID, msg.ProjectID, ctxVersion, cfg.AWSS3Bucket, "", "")
+	newKBID := projectContext.Persist(ctxPath, nil, msg.InstallationID, msg.RepositoryID, msg.ProjectID, ctxVersion, cfg.AWSS3Bucket, "", "")
 
 	result := &StrategyResult{}
 	if newKBID != 0 {
@@ -159,7 +159,7 @@ func (s FullScanStrategy) Handle(_ context.Context, jobID string, data json.RawM
 	if uvPath, err := userView.Generate(uvInput, ctxPath, localPath); err != nil {
 		log.Printf("[FullScan] failed to generate user view (non-fatal): %v", err)
 	} else {
-		uvID := userView.Persist(uvPath, jobIDInt, msg.InstallationID, msg.RepositoryID, msg.ProjectID, version, cfg.AWSS3Bucket, "", "")
+		uvID := userView.Persist(uvPath, result.NewProjectKBID, msg.InstallationID, msg.RepositoryID, msg.ProjectID, version, cfg.AWSS3Bucket, "", "")
 		if uvID != 0 {
 			result.UserViewReportID = &uvID
 		}

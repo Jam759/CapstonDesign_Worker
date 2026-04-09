@@ -11,7 +11,7 @@ type AnalysisJob struct {
 func (AnalysisJob) TableName() string { return "analysis_jobs" }
 
 type ProjectAnalysisReport struct {
-	ProjectMetaReportsID uint      `gorm:"column:project_meta_reports_id;primaryKey;autoIncrement"`
+	ProjectAnalysisReportsID uint      `gorm:"column:project_analysis_reports_id;primaryKey;autoIncrement"`
 	Version              int       `gorm:"column:version;not null"`
 	AnalysisWithReportID *int64    `gorm:"column:analysis_with_report_id"`
 	CreatedAt            time.Time `gorm:"column:created_at;autoCreateTime"`

@@ -62,7 +62,7 @@ func NextReportVersion(projectID int64, reportType string) (int, error) {
 
 func InsertAnalysisReport(
 	projectID int64,
-	analysisJobID int64,
+	relatedReportID *int64,
 	reportType string,
 	version int,
 	s3Bucket string,
@@ -73,7 +73,7 @@ func InsertAnalysisReport(
 ) (int64, error) {
 	record := ProjectAnalysisReport{
 		ProjectID:            projectID,
-		AnalysisWithReportID: &analysisJobID,
+		AnalysisWithReportID: relatedReportID,
 		ReportType:           reportType,
 		Version:              version,
 		S3Bucket:             s3Bucket,
@@ -85,7 +85,7 @@ func InsertAnalysisReport(
 	if err := conn.Create(&record).Error; err != nil {
 		return 0, fmt.Errorf("failed to insert %s report: %w", reportType, err)
 	}
-	return int64(record.ProjectMetaReportsID), nil
+	return int64(record.ProjectAnalysisReportsID), nil
 }
 
 func InsertQuest(

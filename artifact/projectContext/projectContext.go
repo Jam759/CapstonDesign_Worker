@@ -331,24 +331,54 @@ func analyzeModuleChunk(language string, mods []string, moduleNodes map[string][
 
 	responseStr = extractJSONArray(responseStr)
 
-	var details []ModuleDetail
-	if err := json.Unmarshal([]byte(responseStr), &details); err != nil {
-		// 파싱 실패 시 모듈별 fallback
-		details = make([]ModuleDetail, len(mods))
+	// AI가 fields를 string 대신 object/array로 반환할 수 있으므로 map으로 먼저 파싱
+	var rawList []map[string]any
+	if err := json.Unmarshal([]byte(responseStr), &rawList); err != nil {
+		// 완전 파싱 실패 시 fallback
+		details := make([]ModuleDetail, len(mods))
 		for i, mod := range mods {
 			details[i] = ModuleDetail{Module: mod, Language: language, Summary: responseStr}
 		}
 		return details, nil
 	}
 
-	// 모듈명·언어 보정
-	for i := range details {
+	details := make([]ModuleDetail, len(rawList))
+	for i, raw := range rawList {
+		details[i] = ModuleDetail{
+			Module:           anyToString(raw["module"]),
+			Language:         language,
+			Summary:          anyToString(raw["summary"]),
+			Functions:        anyToString(raw["functions"]),
+			Types:            anyToString(raw["types"]),
+			Variables:        anyToString(raw["variables"]),
+			Imports:          anyToString(raw["imports"]),
+			Concurrency:      anyToString(raw["concurrency"]),
+			Patterns:         anyToString(raw["patterns"]),
+			Responsibilities: anyToString(raw["responsibilities"]),
+			ExternalDeps:     anyToString(raw["externalDeps"]),
+			Risks:            anyToString(raw["risks"]),
+		}
 		if details[i].Module == "" && i < len(mods) {
 			details[i].Module = mods[i]
 		}
-		details[i].Language = language
 	}
 	return details, nil
+}
+
+// anyToString은 AI 응답 필드를 문자열로 변환합니다.
+// string이면 그대로, object/array면 JSON 직렬화하여 반환합니다.
+func anyToString(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
 }
 
 // 전체 프로젝트 분석 + signals 보정 (모든 데이터 파일로 전달)
@@ -436,8 +466,8 @@ func extractJSONObject(s string) string {
 }
 
 // Persist는 projectContext 파일을 S3에 업로드하고 project_analysis_reports(PROJECT_KB)에 저장합니다.
-// 반환값: 삽입된 project_meta_reports_id (실패 시 0)
-func Persist(filePath string, jobID int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) int64 {
+// 반환값: 삽입된 project_analysis_reports_id (실패 시 0)
+func Persist(filePath string, prevKBID *int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) int64 {
 	url, err := s3.UploadProjectContext(installationID, repoID, filePath)
 	if err != nil {
 		log.Printf("[ProjectContext] failed to upload to S3: %v", err)
@@ -449,7 +479,7 @@ func Persist(filePath string, jobID int64, installationID int64, repoID int64, p
 		sizeBytes = info.Size()
 	}
 
-	id, err := db.InsertAnalysisReport(projectID, jobID, "PROJECT_KB", version, s3Bucket, url, sizeBytes, beforeCommit, afterCommit)
+	id, err := db.InsertAnalysisReport(projectID, prevKBID, "PROJECT_KB", version, s3Bucket, url, sizeBytes, beforeCommit, afterCommit)
 	if err != nil {
 		log.Printf("[ProjectContext] failed to insert report: %v", err)
 		return 0
