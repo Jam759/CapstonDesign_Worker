@@ -30,14 +30,14 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 	}
 
 	logger.AnalysisStarted(ctx, jobID,
-		slog.String("analysisType", "NORMAL_ANALYSIS"),
+		slog.String("analysisType", "NORMAL_ANALYSIS_REQUEST"),
 		slog.String("repo", msg.RepositoryFullName),
 		slog.String("branch", msg.BranchName),
 		slog.Bool("isMerge", msg.IsMerge),
 	)
 	fail := func(err error) error {
 		logger.AnalysisFailed(ctx, jobID, err, time.Since(startAt).Milliseconds(),
-			slog.String("analysisType", "NORMAL_ANALYSIS"),
+			slog.String("analysisType", "NORMAL_ANALYSIS_REQUEST"),
 			slog.String("repo", msg.RepositoryFullName),
 		)
 		return err
@@ -323,7 +323,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 	}
 
 	logger.AnalysisCompleted(ctx, jobID, time.Since(startAt).Milliseconds(),
-		slog.String("analysisType", "NORMAL_ANALYSIS"),
+		slog.String("analysisType", "NORMAL_ANALYSIS_REQUEST"),
 		slog.String("repo", msg.RepositoryFullName),
 	)
 	return result, nil

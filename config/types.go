@@ -27,4 +27,5 @@ type Config struct {
 	DBMaxIdleConns          int
 	DBConnMaxLifetimeMin    int
 	LogDirectory            string
+	MetricsListenAddr       string
 }

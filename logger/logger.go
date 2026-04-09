@@ -29,7 +29,7 @@ func Init(c Config) error {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	logFile, err := newRotatingFileWriter(c.Directory)
+	logFile, err := newRotatingFileWriter(c.Directory, "structured-http.log")
 	if err != nil {
 		return err
 	}

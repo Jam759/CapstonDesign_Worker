@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"worker_GoVer/apperrors"
+	"worker_GoVer/metrics"
 )
 
 // errorInfo는 메인서버 JSON 로그의 error 필드 구조에 맞춥니다.
@@ -97,6 +98,26 @@ func mergeAttrs(groups ...[]slog.Attr) []slog.Attr {
 	return merged
 }
 
+func attrString(attrs []slog.Attr, key, fallback string) string {
+	for i := len(attrs) - 1; i >= 0; i-- {
+		if attrs[i].Key != key {
+			continue
+		}
+		value := attrs[i].Value
+		switch value.Kind() {
+		case slog.KindString:
+			if text := strings.TrimSpace(value.String()); text != "" {
+				return text
+			}
+		default:
+			if text := strings.TrimSpace(value.String()); text != "" {
+				return text
+			}
+		}
+	}
+	return fallback
+}
+
 // logAttrs는 최종적으로 slog에 로그를 보냅니다.
 func logAttrs(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
 	if global == nil {
@@ -135,6 +156,7 @@ func Debug(ctx context.Context, msg string, attrs ...slog.Attr) {
 
 // SQSReceived는 SQS 메시지를 수신했을 때 기록합니다.
 func SQSReceived(ctx context.Context, jobID, messageType string, extra ...slog.Attr) {
+	metrics.RecordSQSReceived(messageType)
 	attrs := []slog.Attr{
 		slog.String("category", CategorySQS),
 		slog.String("eventType", EventSQSReceived),
@@ -147,6 +169,7 @@ func SQSReceived(ctx context.Context, jobID, messageType string, extra ...slog.A
 
 // SQSProcessed는 SQS 메시지 처리를 성공적으로 완료했을 때 기록합니다.
 func SQSProcessed(ctx context.Context, jobID, messageType string, durationMs int64, extra ...slog.Attr) {
+	metrics.RecordSQSFinished(messageType, "processed", durationMs)
 	attrs := []slog.Attr{
 		slog.String("category", CategorySQS),
 		slog.String("eventType", EventSQSProcessed),
@@ -160,6 +183,7 @@ func SQSProcessed(ctx context.Context, jobID, messageType string, durationMs int
 
 // SQSFailed는 SQS 메시지 처리 실패 시 기록합니다.
 func SQSFailed(ctx context.Context, jobID, messageType string, err error, durationMs int64, extra ...slog.Attr) {
+	metrics.RecordSQSFinished(messageType, "failed", durationMs)
 	attrs := []slog.Attr{
 		slog.String("category", CategorySQS),
 		slog.String("eventType", EventSQSFailed),
@@ -180,6 +204,7 @@ func SQSFailed(ctx context.Context, jobID, messageType string, err error, durati
 
 // AnalysisStarted는 분석 작업 시작을 기록합니다.
 func AnalysisStarted(ctx context.Context, jobID string, extra ...slog.Attr) {
+	metrics.RecordAnalysisStarted(attrString(extra, "analysisType", "unknown"))
 	attrs := []slog.Attr{
 		slog.String("category", CategoryAnalysis),
 		slog.String("eventType", EventAnalysisStarted),
@@ -191,6 +216,7 @@ func AnalysisStarted(ctx context.Context, jobID string, extra ...slog.Attr) {
 
 // AnalysisCompleted는 분석 작업 완료를 기록합니다.
 func AnalysisCompleted(ctx context.Context, jobID string, durationMs int64, extra ...slog.Attr) {
+	metrics.RecordAnalysisFinished(attrString(extra, "analysisType", "unknown"), "completed", durationMs)
 	attrs := []slog.Attr{
 		slog.String("category", CategoryAnalysis),
 		slog.String("eventType", EventAnalysisCompleted),
@@ -203,6 +229,7 @@ func AnalysisCompleted(ctx context.Context, jobID string, durationMs int64, extr
 
 // AnalysisFailed는 분석 작업 실패를 기록합니다.
 func AnalysisFailed(ctx context.Context, jobID string, err error, durationMs int64, extra ...slog.Attr) {
+	metrics.RecordAnalysisFinished(attrString(extra, "analysisType", "unknown"), "failed", durationMs)
 	attrs := []slog.Attr{
 		slog.String("category", CategoryAnalysis),
 		slog.String("eventType", EventAnalysisFailed),
@@ -235,6 +262,7 @@ type StepTimer struct {
 //	if err := doWork(); err != nil { step.Fail(err); return err }
 //	step.Complete()
 func StepStart(ctx context.Context, stepName, jobID string, extra ...slog.Attr) *StepTimer {
+	metrics.RecordStepStarted(stepName)
 	attrs := []slog.Attr{
 		slog.String("category", CategoryJobStep),
 		slog.String("eventType", EventStepStarted),
@@ -251,12 +279,14 @@ func (s *StepTimer) Complete(extra ...slog.Attr) {
 	if s == nil {
 		return
 	}
+	durationMs := time.Since(s.startAt).Milliseconds()
+	metrics.RecordStepFinished(s.stepName, "completed", durationMs)
 	attrs := []slog.Attr{
 		slog.String("category", CategoryJobStep),
 		slog.String("eventType", EventStepCompleted),
 		slog.String("jobId", s.jobID),
 		slog.String("stepName", s.stepName),
-		slog.Int64("durationMs", time.Since(s.startAt).Milliseconds()),
+		slog.Int64("durationMs", durationMs),
 	}
 	attrs = append(attrs, extra...)
 	logAttrs(s.ctx, slog.LevelInfo, s.stepName+" completed", attrs...)
@@ -267,12 +297,14 @@ func (s *StepTimer) Fail(err error, extra ...slog.Attr) {
 	if s == nil {
 		return
 	}
+	durationMs := time.Since(s.startAt).Milliseconds()
+	metrics.RecordStepFinished(s.stepName, "failed", durationMs)
 	attrs := []slog.Attr{
 		slog.String("category", CategoryJobStep),
 		slog.String("eventType", EventStepFailed),
 		slog.String("jobId", s.jobID),
 		slog.String("stepName", s.stepName),
-		slog.Int64("durationMs", time.Since(s.startAt).Milliseconds()),
+		slog.Int64("durationMs", durationMs),
 	}
 	if err != nil {
 		attrs = append(attrs, errorAttr(err))
@@ -286,6 +318,7 @@ func (s *StepTimer) Fail(err error, extra ...slog.Attr) {
 // ============================================================
 
 func WorkerEvent(ctx context.Context, eventType, msg string, extra ...slog.Attr) {
+	metrics.RecordWorkerEvent(eventType)
 	attrs := []slog.Attr{
 		slog.String("category", CategoryWorker),
 		slog.String("eventType", eventType),

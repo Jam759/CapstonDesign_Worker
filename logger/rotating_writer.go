@@ -20,17 +20,27 @@ type rotatingFileWriter struct {
 	dir        string
 	archiveDir string
 	activePath string
+	baseName   string
+	baseExt    string
 
 	mu   sync.Mutex
 	file *os.File
 	size int64
 }
 
-func newRotatingFileWriter(dir string) (*rotatingFileWriter, error) {
+func newRotatingFileWriter(dir string, fileName string) (*rotatingFileWriter, error) {
+	baseExt := filepath.Ext(fileName)
+	baseName := strings.TrimSuffix(fileName, baseExt)
+	if baseExt == "" {
+		baseExt = ".log"
+	}
+
 	writer := &rotatingFileWriter{
 		dir:        dir,
 		archiveDir: filepath.Join(dir, "archive"),
-		activePath: filepath.Join(dir, "worker.log"),
+		activePath: filepath.Join(dir, fileName),
+		baseName:   baseName,
+		baseExt:    baseExt,
 	}
 
 	if err := os.MkdirAll(writer.dir, 0o755); err != nil {
@@ -114,7 +124,7 @@ func (w *rotatingFileWriter) rotate() error {
 
 func (w *rotatingFileWriter) nextArchivePath() (string, error) {
 	dateKey := time.Now().In(time.FixedZone("KST", 9*60*60)).Format("2006-01-02")
-	pattern := fmt.Sprintf("worker.%s.*.log", dateKey)
+	pattern := fmt.Sprintf("%s.%s.*%s", w.baseName, dateKey, w.baseExt)
 
 	entries, err := filepath.Glob(filepath.Join(w.archiveDir, pattern))
 	if err != nil {
@@ -125,16 +135,16 @@ func (w *rotatingFileWriter) nextArchivePath() (string, error) {
 	for _, entry := range entries {
 		base := filepath.Base(entry)
 		parts := strings.Split(base, ".")
-		if len(parts) != 5 {
+		if len(parts) < 4 {
 			continue
 		}
 		var idx int
-		if _, err := fmt.Sscanf(parts[3], "%d", &idx); err == nil && idx > maxIndex {
+		if _, err := fmt.Sscanf(parts[len(parts)-2], "%d", &idx); err == nil && idx > maxIndex {
 			maxIndex = idx
 		}
 	}
 
-	return filepath.Join(w.archiveDir, fmt.Sprintf("worker.%s.%d.log", dateKey, maxIndex+1)), nil
+	return filepath.Join(w.archiveDir, fmt.Sprintf("%s.%s.%d%s", w.baseName, dateKey, maxIndex+1, w.baseExt)), nil
 }
 
 func (w *rotatingFileWriter) cleanupArchives() error {

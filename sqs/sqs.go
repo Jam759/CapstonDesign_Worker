@@ -10,6 +10,7 @@ import (
 	"worker_GoVer/apperrors"
 	"worker_GoVer/config"
 	"worker_GoVer/logger"
+	"worker_GoVer/metrics"
 	"worker_GoVer/sqs/strategy"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -66,6 +67,7 @@ func (c *Consumer) StartAnalysisListener(ctx context.Context) {
 			WaitTimeSeconds:     20, // long polling
 		})
 		if err != nil {
+			metrics.RecordSQSPollError()
 			logger.Error(ctx, "SQS receive error", err, slog.String("category", logger.CategorySQS))
 			continue
 		}
@@ -214,8 +216,11 @@ func (c *Consumer) PublishNotification(ctx context.Context, msg NotificationQueu
 		MessageBody: aws.String(string(body)),
 	})
 	if err != nil {
+		metrics.RecordNotificationPublished(string(msg.EventType), "failed")
 		return fmt.Errorf("failed to publish notification: %w", err)
 	}
+
+	metrics.RecordNotificationPublished(string(msg.EventType), "published")
 
 	logger.Info(ctx, "SQS notification published",
 		slog.String("jobId", msg.JobID),

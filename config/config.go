@@ -60,6 +60,21 @@ func getWorkspacePath() string {
 	return filepath.Join(filepath.Dir(getExecutedPath()), "disk")
 }
 
+func getDefaultLogDirectory() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "./.logs"
+	}
+
+	candidate := filepath.Join(cwd, "..", "CapstoneDesign", ".worker-logs")
+	parent := filepath.Dir(candidate)
+	if info, statErr := os.Stat(parent); statErr == nil && info.IsDir() {
+		return candidate
+	}
+
+	return "./.logs"
+}
+
 var cfg *Config
 
 func Get() *Config {
@@ -122,7 +137,7 @@ func LoadConfig() {
 		GitHubClientID:          mustGetEnv("GITHUB_CLIENT_ID"),
 		GitHubClientSecret:      mustGetEnv("GITHUB_CLIENT_SECRET"),
 		GitHubAppStateSecret:    mustGetEnv("GITHUB_APP_STATE_SECRET"),
-		Debug:                   getEnvAsBool("DEBUG", false),
+		Debug:                   getEnvAsBool("DEBUG", true),
 		AWSRegion:               mustGetEnv("AWS_REGION"),
 		AWSAccessKeyID:          mustGetEnv("AWS_ACCESS_KEY_ID"),
 		AWSSecretAccessKey:      mustGetEnv("AWS_SECRET_ACCESS_KEY"),
@@ -134,6 +149,7 @@ func LoadConfig() {
 		DBMaxOpenConns:          getEnvAsInt("DB_MAX_OPEN_CONNS", 10),
 		DBMaxIdleConns:          getEnvAsInt("DB_MAX_IDLE_CONNS", 5),
 		DBConnMaxLifetimeMin:    getEnvAsInt("DB_CONN_MAX_LIFETIME_MIN", 5),
-		LogDirectory:            getEnv("LOG_DIRECTORY", "./.logs"),
+		LogDirectory:            getEnv("LOG_DIRECTORY", getDefaultLogDirectory()),
+		MetricsListenAddr:       getEnv("METRICS_LISTEN_ADDR", ":3000"),
 	}
 }

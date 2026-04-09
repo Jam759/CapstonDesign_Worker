@@ -32,13 +32,13 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 	}
 
 	logger.AnalysisStarted(ctx, jobID,
-		slog.String("analysisType", "FULL_SCAN"),
+		slog.String("analysisType", "FULL_SCAN_ANALYSIS_REQUEST"),
 		slog.String("repo", msg.RepositoryFullName),
 		slog.String("branch", msg.BranchName),
 	)
 	fail := func(err error) error {
 		logger.AnalysisFailed(ctx, jobID, err, time.Since(startAt).Milliseconds(),
-			slog.String("analysisType", "FULL_SCAN"),
+			slog.String("analysisType", "FULL_SCAN_ANALYSIS_REQUEST"),
 			slog.String("repo", msg.RepositoryFullName),
 		)
 		return err
@@ -265,7 +265,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 	}
 
 	logger.AnalysisCompleted(ctx, jobID, time.Since(startAt).Milliseconds(),
-		slog.String("analysisType", "FULL_SCAN"),
+		slog.String("analysisType", "FULL_SCAN_ANALYSIS_REQUEST"),
 		slog.String("repo", msg.RepositoryFullName),
 	)
 	return result, nil
