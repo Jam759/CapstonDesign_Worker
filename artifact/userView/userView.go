@@ -1,15 +1,17 @@
 package userView
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 	"worker_GoVer/ai"
 	"worker_GoVer/db"
+	"worker_GoVer/logger"
 	"worker_GoVer/s3"
 )
 
@@ -25,11 +27,14 @@ func extractJSONObject(s string) string {
 
 // Generate는 projectContext 파일 기반으로 UserView를 AI 생성하고 파일로 저장합니다.
 // 반환값: 저장된 파일 경로
-func Generate(input GenerateInput, projCtxPath string, projectPath string) (string, error) {
-	log.Printf("[UserView] start v%d userID=%d", input.Version, input.UserID)
+func Generate(ctx context.Context, input GenerateInput, projCtxPath string, projectPath string) (string, error) {
+	logger.Info(ctx, "userView generation start",
+		slog.Int("version", input.Version),
+		slog.Int64("userId", input.UserID),
+	)
 
 	p := ai.UserViewPrompt()
-	result := <-ai.GenerateMessageWithFiles(p.User, p.System, []string{projCtxPath})
+	result := <-ai.GenerateMessageWithFiles(ctx, p.User, p.System, []string{projCtxPath})
 	if result.Err != nil {
 		return "", fmt.Errorf("AI generation failed: %w", result.Err)
 	}
@@ -95,16 +100,16 @@ func Generate(input GenerateInput, projCtxPath string, projectPath string) (stri
 		return "", fmt.Errorf("failed to write user view: %w", err)
 	}
 
-	log.Printf("[UserView] saved: %s", savePath)
+	logger.Info(ctx, "userView saved", slog.String("path", savePath))
 	return savePath, nil
 }
 
 // Persist는 userView 파일을 S3에 업로드하고 project_analysis_reports(USER_VIEW)에 저장합니다.
 // 반환값: 삽입된 project_analysis_reports_id (실패 시 0)
-func Persist(filePath string, newKBID *int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) int64 {
-	url, err := s3.UploadUserView(installationID, repoID, filePath)
+func Persist(ctx context.Context, filePath string, newKBID *int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) int64 {
+	url, err := s3.UploadUserView(ctx, installationID, repoID, filePath)
 	if err != nil {
-		log.Printf("[UserView] failed to upload to S3: %v", err)
+		logger.Error(ctx, "userView S3 upload failed", err)
 		return 0
 	}
 
@@ -115,9 +120,12 @@ func Persist(filePath string, newKBID *int64, installationID int64, repoID int64
 
 	id, err := db.InsertAnalysisReport(projectID, newKBID, "USER_VIEW", version, s3Bucket, url, sizeBytes, beforeCommit, afterCommit)
 	if err != nil {
-		log.Printf("[UserView] failed to insert report: %v", err)
+		logger.Error(ctx, "userView DB insert failed", err)
 		return 0
 	}
-	log.Printf("[UserView] USER_VIEW v%d saved: %s", version, url)
+	logger.Info(ctx, "USER_VIEW saved",
+		slog.Int("version", version),
+		slog.String("url", url),
+	)
 	return id
 }

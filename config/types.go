@@ -26,4 +26,5 @@ type Config struct {
 	DBMaxOpenConns          int
 	DBMaxIdleConns          int
 	DBConnMaxLifetimeMin    int
+	LogDirectory            string
 }

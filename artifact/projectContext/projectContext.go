@@ -1,9 +1,10 @@
 package projectContext
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,13 +15,14 @@ import (
 	"worker_GoVer/ai"
 	"worker_GoVer/artifact/codeGraph/strategy"
 	"worker_GoVer/db"
+	"worker_GoVer/logger"
 	"worker_GoVer/s3"
 )
 
 // GenerateProjectContext는 codeGraph + codeContent 기반으로 프로젝트 분석 문서를 생성합니다.
 // 흐름: metrics 계산 → signals 정적 분석 → 모듈별 AI 분석(병렬) → 전체 AI 분석 + signals 보정 → 저장
-func GenerateProjectContext(projectPath string, graphPath string, contentPath string, version int) (string, error) {
-	log.Printf("[ProjectContext] start v%d", version)
+func GenerateProjectContext(ctx context.Context, projectPath string, graphPath string, contentPath string, version int) (string, error) {
+	logger.Info(ctx, "projectContext generation start", slog.Int("version", version))
 
 	// 파일 읽기
 	graphData, err := os.ReadFile(graphPath)
@@ -38,7 +40,12 @@ func GenerateProjectContext(projectPath string, graphPath string, contentPath st
 	}
 
 	// 1. 정량 메트릭 계산 (codeGraph 기반, AI 불필요)
-	log.Printf("[ProjectContext] graph loaded: language=%s nodes=%d edges=%d imports=%d", graph.Language, len(graph.Nodes), len(graph.Edges), len(graph.Imports))
+	logger.Info(ctx, "graph loaded",
+		slog.String("language", graph.Language),
+		slog.Int("nodes", len(graph.Nodes)),
+		slog.Int("edges", len(graph.Edges)),
+		slog.Int("imports", len(graph.Imports)),
+	)
 	metrics := CalculateMetrics(&graph)
 
 	// 2. codeContent 파싱
@@ -61,7 +68,10 @@ func GenerateProjectContext(projectPath string, graphPath string, contentPath st
 	}
 
 	chunks := chunkModulesByNodeCount(moduleNames, moduleNodes, 5)
-	log.Printf("[ProjectContext] metrics calculated, signals analyzed, starting chunk AI analysis: modules=%d chunks=%d", len(moduleNames), len(chunks))
+	logger.Info(ctx, "starting chunk AI analysis",
+		slog.Int("modules", len(moduleNames)),
+		slog.Int("chunks", len(chunks)),
+	)
 
 	type chunkResult struct {
 		details []ModuleDetail
@@ -74,7 +84,7 @@ func GenerateProjectContext(projectPath string, graphPath string, contentPath st
 		wg.Add(1)
 		go func(idx int, mods []string) {
 			defer wg.Done()
-			ds, err := analyzeModuleChunk(graph.Language, mods, moduleNodes, moduleImports, moduleContents)
+			ds, err := analyzeModuleChunk(ctx, graph.Language, mods, moduleNodes, moduleImports, moduleContents)
 			chunkResults[idx] = chunkResult{details: ds, err: err}
 		}(i, chunk)
 	}
@@ -88,11 +98,11 @@ func GenerateProjectContext(projectPath string, graphPath string, contentPath st
 		details = append(details, r.details...)
 	}
 
-	log.Printf("[ProjectContext] module analysis done: %d modules", len(details))
+	logger.Info(ctx, "module analysis done", slog.Int("modules", len(details)))
 
 	// 5. 전체 프로젝트 분석 + signals AI 보정 (파일 전달)
-	log.Printf("[ProjectContext] generating overview...")
-	analysis, correctedSignals, err := generateOverview(details, &graph, metrics, signals, graphPath, contentPath)
+	logger.Info(ctx, "generating overview")
+	analysis, correctedSignals, err := generateOverview(ctx, details, &graph, metrics, signals, graphPath, contentPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate overview: %w", err)
 	}
@@ -104,7 +114,7 @@ func GenerateProjectContext(projectPath string, graphPath string, contentPath st
 
 	// 6. ProjectContext 조립
 	seoul, _ := time.LoadLocation("Asia/Seoul")
-	ctx := ProjectContext{
+	pctx := ProjectContext{
 		Metrics:       metrics,
 		Signals:       signals,
 		Analysis:      *analysis,
@@ -114,20 +124,26 @@ func GenerateProjectContext(projectPath string, graphPath string, contentPath st
 	}
 
 	// 7. 저장
-	return saveProjectContext(projectPath, ctx, version, seoul)
+	return saveProjectContext(ctx, projectPath, pctx, version, seoul)
 }
 
 // UpdateProjectContext는 baseline ProjectContext를 git diff 기반으로 증분 업데이트합니다.
 // diffFiles가 없으면 CodeGraph만 교체하고 기존 분석 결과를 유지합니다.
 func UpdateProjectContext(
+	ctx context.Context,
 	localPath string,
 	baselineKBPath string,
 	diffPath string,
 	graphPath string,
 	changedFilePaths []string,
+	beforeCommit string,
+	afterCommit string,
 	version int,
 ) (string, error) {
-	log.Printf("[ProjectContext] incremental update v%d changedFiles=%d", version, len(changedFilePaths))
+	logger.Info(ctx, "projectContext incremental update start",
+		slog.Int("version", version),
+		slog.Int("changedFiles", len(changedFilePaths)),
+	)
 
 	// baseline 파싱
 	baselineData, err := os.ReadFile(baselineKBPath)
@@ -153,10 +169,10 @@ func UpdateProjectContext(
 
 	// diff가 없으면 CodeGraph만 교체하고 baseline 분석 유지
 	if len(changedFilePaths) == 0 {
-		log.Printf("[ProjectContext] no changed files, reusing baseline analysis")
+		logger.Info(ctx, "no changed files, reusing baseline analysis")
 		baseline.CodeGraph = &graph
 		baseline.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
-		return saveProjectContext(localPath, baseline, version, seoul)
+		return saveProjectContext(ctx, localPath, baseline, version, seoul)
 	}
 
 	// focused CodeGraph 생성 (변경된 파일에 속한 노드/엣지만)
@@ -167,11 +183,9 @@ func UpdateProjectContext(
 	}
 	defer os.Remove(focusedPath)
 
-	// AI 증분 업데이트
-	effectiveBeforeCommit := ""
-	afterCommit := ""
-	p := ai.IncrementalProjectContextPrompt(effectiveBeforeCommit, afterCommit)
-	result := <-ai.GenerateMessageWithFiles(p.User, p.System, []string{baselineKBPath, diffPath, focusedPath})
+	// AI 증분 업데이트 (실제 커밋 해시를 프롬프트에 전달)
+	p := ai.IncrementalProjectContextPrompt(beforeCommit, afterCommit)
+	result := <-ai.GenerateMessageWithFiles(ctx, p.User, p.System, []string{baselineKBPath, diffPath, focusedPath})
 	if result.Err != nil {
 		return "", fmt.Errorf("incremental AI analysis failed: %w", result.Err)
 	}
@@ -184,17 +198,19 @@ func UpdateProjectContext(
 
 	var updated ProjectContext
 	if err := json.Unmarshal([]byte(responseStr), &updated); err != nil {
-		log.Printf("[ProjectContext] failed to parse incremental response, falling back to baseline: %v", err)
+		logger.Warn(ctx, "failed to parse incremental response, falling back to baseline",
+			slog.String("reason", err.Error()),
+		)
 		baseline.CodeGraph = &graph
 		baseline.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
-		return saveProjectContext(localPath, baseline, version, seoul)
+		return saveProjectContext(ctx, localPath, baseline, version, seoul)
 	}
 
 	// CodeGraph는 항상 새로 생성된 것으로 교체
 	updated.CodeGraph = &graph
 	updated.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
 
-	return saveProjectContext(localPath, updated, version, seoul)
+	return saveProjectContext(ctx, localPath, updated, version, seoul)
 }
 
 // buildFocusedCodeGraph는 변경된 파일에 속한 노드/엣지/임포트만 포함한 CodeGraph를 반환합니다.
@@ -234,8 +250,8 @@ func buildFocusedCodeGraph(graph *strategy.CodeGraph, changedFilePaths []string)
 }
 
 // saveProjectContext는 ProjectContext를 JSON으로 직렬화하여 artifact 디렉토리에 저장합니다.
-func saveProjectContext(localPath string, ctx ProjectContext, version int, loc *time.Location) (string, error) {
-	data, err := json.MarshalIndent(ctx, "", "  ")
+func saveProjectContext(ctx context.Context, localPath string, pctx ProjectContext, version int, loc *time.Location) (string, error) {
+	data, err := json.MarshalIndent(pctx, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal project context: %w", err)
 	}
@@ -252,7 +268,7 @@ func saveProjectContext(localPath string, ctx ProjectContext, version int, loc *
 		return "", fmt.Errorf("failed to write project context: %w", err)
 	}
 
-	log.Printf("[ProjectContext] saved: %s", savePath)
+	logger.Info(ctx, "projectContext saved", slog.String("path", savePath))
 	return savePath, nil
 }
 
@@ -299,9 +315,8 @@ func chunkModulesByNodeCount(moduleNames []string, moduleNodes map[string][]stra
 	return chunks
 }
 
-
 // analyzeModuleChunk는 청크에 포함된 모듈들을 파일 업로드 방식으로 AI 분석합니다.
-func analyzeModuleChunk(language string, mods []string, moduleNodes map[string][]strategy.Node, moduleImports map[string][]strategy.Import, moduleContents map[string][]map[string]any) ([]ModuleDetail, error) {
+func analyzeModuleChunk(ctx context.Context, language string, mods []string, moduleNodes map[string][]strategy.Node, moduleImports map[string][]strategy.Import, moduleContents map[string][]map[string]any) ([]ModuleDetail, error) {
 	// 청크 데이터 구성
 	chunk := moduleChunkInput{Language: language}
 	for _, mod := range mods {
@@ -321,7 +336,7 @@ func analyzeModuleChunk(language string, mods []string, moduleNodes map[string][
 	defer os.Remove(chunkPath)
 
 	p := ai.ModuleChunkPrompt()
-	result := <-ai.GenerateMessageWithFiles(p.User, p.System, []string{chunkPath})
+	result := <-ai.GenerateMessageWithFiles(ctx, p.User, p.System, []string{chunkPath})
 	if result.Err != nil {
 		return nil, result.Err
 	}
@@ -353,7 +368,7 @@ func analyzeModuleChunk(language string, mods []string, moduleNodes map[string][
 }
 
 // 전체 프로젝트 분석 + signals 보정 (모든 데이터 파일로 전달)
-func generateOverview(details []ModuleDetail, graph *strategy.CodeGraph, metrics Metrics, signals Signals, graphPath string, contentPath string) (*Analysis, *Signals, error) {
+func generateOverview(ctx context.Context, details []ModuleDetail, graph *strategy.CodeGraph, metrics Metrics, signals Signals, graphPath string, contentPath string) (*Analysis, *Signals, error) {
 	detailsPath, err := writeTempJSON("moduleDetails_*.json", details)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to write module details: %w", err)
@@ -373,7 +388,7 @@ func generateOverview(details []ModuleDetail, graph *strategy.CodeGraph, metrics
 	defer os.Remove(signalsPath)
 
 	p := ai.ProjectOverviewPrompt()
-	result := <-ai.GenerateMessageWithFiles(p.User, p.System, []string{graphPath, contentPath, detailsPath, metricsPath, signalsPath})
+	result := <-ai.GenerateMessageWithFiles(ctx, p.User, p.System, []string{graphPath, contentPath, detailsPath, metricsPath, signalsPath})
 	if result.Err != nil {
 		return nil, nil, result.Err
 	}
@@ -520,10 +535,10 @@ func extractJSONObject(s string) string {
 
 // Persist는 projectContext 파일을 S3에 업로드하고 project_analysis_reports(PROJECT_KB)에 저장합니다.
 // 반환값: 삽입된 project_analysis_reports_id (실패 시 0)
-func Persist(filePath string, prevKBID *int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) int64 {
-	url, err := s3.UploadProjectContext(installationID, repoID, filePath)
+func Persist(ctx context.Context, filePath string, prevKBID *int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) int64 {
+	url, err := s3.UploadProjectContext(ctx, installationID, repoID, filePath)
 	if err != nil {
-		log.Printf("[ProjectContext] failed to upload to S3: %v", err)
+		logger.Error(ctx, "projectContext S3 upload failed", err)
 		return 0
 	}
 
@@ -534,10 +549,13 @@ func Persist(filePath string, prevKBID *int64, installationID int64, repoID int6
 
 	id, err := db.InsertAnalysisReport(projectID, prevKBID, "PROJECT_KB", version, s3Bucket, url, sizeBytes, beforeCommit, afterCommit)
 	if err != nil {
-		log.Printf("[ProjectContext] failed to insert report: %v", err)
+		logger.Error(ctx, "projectContext DB insert failed", err)
 		return 0
 	}
-	log.Printf("[ProjectContext] PROJECT_KB v%d saved: %s", version, url)
+	logger.Info(ctx, "PROJECT_KB saved",
+		slog.Int("version", version),
+		slog.String("url", url),
+	)
 	return id
 }
 

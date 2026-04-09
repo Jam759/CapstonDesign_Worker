@@ -2,13 +2,20 @@ package strategy
 
 import (
 	"bufio"
+	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"worker_GoVer/logger"
 )
+
+// logfJ는 java strategy 내부 상세 로그용 헬퍼입니다.
+func logfJ(format string, args ...any) {
+	logger.Info(context.Background(), fmt.Sprintf(format, args...), slog.String("component", "codeGraph/java"))
+}
 
 var (
 	reJavaPackage    = regexp.MustCompile(`^\s*package\s+([\w.]+)\s*;`)
@@ -37,7 +44,7 @@ func (j JavaStrategy) SupportedExtensions() []string {
 
 func (j JavaStrategy) Analyze(projectPath string) (*CodeGraph, error) {
 	graph := &CodeGraph{Language: "java"}
-	log.Printf("[JavaStrategy] start analyzing: %s", projectPath)
+	logfJ("[JavaStrategy] start analyzing: %s", projectPath)
 
 	fileCount := 0
 	err := filepath.Walk(projectPath, func(path string, info os.FileInfo, err error) error {
@@ -48,7 +55,7 @@ func (j JavaStrategy) Analyze(projectPath string) (*CodeGraph, error) {
 			name := info.Name()
 			if name == ".git" || name == "artifact" || name == "build" ||
 				name == "target" || name == ".gradle" || name == "node_modules" {
-				log.Printf("[JavaStrategy] skip dir: %s", path)
+				logfJ("[JavaStrategy] skip dir: %s", path)
 				return filepath.SkipDir
 			}
 			return nil
@@ -57,7 +64,7 @@ func (j JavaStrategy) Analyze(projectPath string) (*CodeGraph, error) {
 			return nil
 		}
 		relPath, _ := filepath.Rel(projectPath, path)
-		log.Printf("[JavaStrategy] parsing: %s", relPath)
+		logfJ("[JavaStrategy] parsing: %s", relPath)
 		j.parseFile(graph, path, relPath)
 		fileCount++
 		return nil
@@ -66,7 +73,7 @@ func (j JavaStrategy) Analyze(projectPath string) (*CodeGraph, error) {
 		return nil, fmt.Errorf("failed to walk project: %w", err)
 	}
 
-	log.Printf("[JavaStrategy] done: files=%d nodes=%d edges=%d imports=%d",
+	logfJ("[JavaStrategy] done: files=%d nodes=%d edges=%d imports=%d",
 		fileCount, len(graph.Nodes), len(graph.Edges), len(graph.Imports))
 	return graph, nil
 }
@@ -80,7 +87,7 @@ type javaClassCtx struct {
 func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 	f, err := os.Open(absPath)
 	if err != nil {
-		log.Printf("[JavaStrategy] failed to open file %s: %v", relPath, err)
+		logfJ("[JavaStrategy] failed to open file %s: %v", relPath, err)
 		return
 	}
 	defer f.Close()
@@ -188,7 +195,7 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 				kind = "record"
 			}
 
-			log.Printf("[JavaStrategy] %s: %s (line %d) in %s", kind, className, lineNum, relPath)
+			logfJ("[JavaStrategy] %s: %s (line %d) in %s", kind, className, lineNum, relPath)
 
 			graph.Nodes = append(graph.Nodes, Node{
 				ID:       nodeID,
@@ -243,7 +250,7 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 						kind = "function"
 					}
 
-					log.Printf("[JavaStrategy] method: %s (line %d) in %s", methodName, lineNum, relPath)
+					logfJ("[JavaStrategy] method: %s (line %d) in %s", methodName, lineNum, relPath)
 
 					graph.Nodes = append(graph.Nodes, Node{
 						ID:       nodeID,

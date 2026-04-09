@@ -1,17 +1,19 @@
 package git
 
 import (
+	"context"
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 	"worker_GoVer/config"
+	"worker_GoVer/logger"
 
 	"github.com/google/uuid"
 
@@ -71,8 +73,13 @@ func getInstallationToken(appJWT string, installationID int64) (string, error) {
 // localPath: clone할 로컬 경로 (호출자가 결정)
 // repoFullName: "owner/repo" 형식
 // branchName: 클론할 브랜치명
-func CloneRepository(installationID int64, repoFullName string, localPath string, branchName string) error {
-	log.Printf("[Git] cloning repo=%s branch=%s installationID=%d to=%s", repoFullName, branchName, installationID, localPath)
+func CloneRepository(ctx context.Context, installationID int64, repoFullName string, localPath string, branchName string) error {
+	logger.Info(ctx, "git clone start",
+		slog.String("repo", repoFullName),
+		slog.String("branch", branchName),
+		slog.Int64("installationID", installationID),
+		slog.String("localPath", localPath),
+	)
 	cfg := config.Get()
 
 	// 1. Private key 파싱
@@ -107,13 +114,14 @@ func CloneRepository(installationID int64, repoFullName string, localPath string
 		return fmt.Errorf("failed to clone repository: %w", err)
 	}
 
-	log.Printf("[Git] clone done repo=%s", repoFullName)
+	logger.Info(ctx, "git clone done", slog.String("repo", repoFullName))
 	return nil
 }
 
 // CheckoutBranch는 원격 브랜치(origin/{branchName})의 최신 커밋으로 working tree를 이동합니다.
 // clone/fetch 후 항상 호출해야 올바른 브랜치 상태가 보장됩니다.
-func CheckoutBranch(clonePath string, branchName string) error {
+func CheckoutBranch(ctx context.Context, clonePath string, branchName string) error {
+	_ = ctx
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
@@ -140,7 +148,8 @@ func CheckoutBranch(clonePath string, branchName string) error {
 }
 
 // Checkout은 로컬 저장소를 특정 commit으로 이동합니다.
-func Checkout(clonePath string, commitSHA string) error {
+func Checkout(ctx context.Context, clonePath string, commitSHA string) error {
+	_ = ctx
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return fmt.Errorf("failed to open repository: %w", err)
@@ -162,7 +171,8 @@ func Checkout(clonePath string, commitSHA string) error {
 }
 
 // DiffFileList는 두 commit 간 변경된 파일 목록을 반환합니다.
-func DiffFileList(clonePath, beforeCommitSHA, afterCommitSHA string, isMerge bool) ([]FileDiffStat, error) {
+func DiffFileList(ctx context.Context, clonePath, beforeCommitSHA, afterCommitSHA string, isMerge bool) ([]FileDiffStat, error) {
+	_ = ctx
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open repository: %w", err)
@@ -229,7 +239,8 @@ func DiffFileList(clonePath, beforeCommitSHA, afterCommitSHA string, isMerge boo
 // Diff는 두 commit 간의 unified diff를 반환합니다.
 // isMerge=true: afterCommitSHA의 첫 번째 부모와 afterCommitSHA 간 diff
 // isMerge=false: beforeCommitSHA와 afterCommitSHA 간 diff
-func Diff(clonePath string, beforeCommitSHA string, afterCommitSHA string, isMerge bool) (string, error) {
+func Diff(ctx context.Context, clonePath string, beforeCommitSHA string, afterCommitSHA string, isMerge bool) (string, error) {
+	_ = ctx
 	repo, err := git.PlainOpen(clonePath)
 	if err != nil {
 		return "", fmt.Errorf("failed to open repository: %w", err)
@@ -303,8 +314,11 @@ func Diff(clonePath string, beforeCommitSHA string, afterCommitSHA string, isMer
 }
 
 // Fetch는 원격 저장소의 최신 상태를 가져옵니다.
-func Fetch(clonePath string, installationID int64) error {
-	log.Printf("[Git] fetching installationID=%d path=%s", installationID, clonePath)
+func Fetch(ctx context.Context, clonePath string, installationID int64) error {
+	logger.Info(ctx, "git fetch start",
+		slog.Int64("installationID", installationID),
+		slog.String("clonePath", clonePath),
+	)
 	cfg := config.Get()
 
 	privateKey, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(cfg.GitHubAppPrivateKey))
@@ -337,6 +351,6 @@ func Fetch(clonePath string, installationID int64) error {
 		return fmt.Errorf("failed to fetch: %w", err)
 	}
 
-	log.Printf("[Git] fetch done installationID=%d", installationID)
+	logger.Info(ctx, "git fetch done", slog.Int64("installationID", installationID))
 	return nil
 }

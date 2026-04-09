@@ -1,12 +1,14 @@
 package quest
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"worker_GoVer/ai"
 	"worker_GoVer/db"
+	"worker_GoVer/logger"
 )
 
 func extractJSONObject(s string) string {
@@ -20,7 +22,8 @@ func extractJSONObject(s string) string {
 }
 
 // BuildQuestRequest는 DB에서 기존 퀘스트와 최근 평가 이력을 조회하여 QuestRequest를 조립합니다.
-func BuildQuestRequest(jobID int64, projectID int64, userID int64, repositoryFullName string, branchName string) (QuestRequest, error) {
+func BuildQuestRequest(ctx context.Context, jobID int64, projectID int64, userID int64, repositoryFullName string, branchName string) (QuestRequest, error) {
+	_ = ctx
 	// 1. ACTIVE 퀘스트 조회
 	rows, err := db.FetchActiveQuests(projectID, userID)
 	if err != nil {
@@ -80,11 +83,12 @@ func BuildQuestRequest(jobID int64, projectID int64, userID int64, repositoryFul
 }
 
 // GenerateAndEvaluateQuests는 projectContext 파일 기반으로 퀘스트를 평가하고 새 퀘스트를 생성합니다.
-func GenerateAndEvaluateQuests(projCtxPath string, request QuestRequest) (*QuestResponse, error) {
+func GenerateAndEvaluateQuests(ctx context.Context, projCtxPath string, request QuestRequest) (*QuestResponse, error) {
 	requestJSON, _ := json.Marshal(request)
 
 	p := ai.QuestPrompt(string(requestJSON))
-	result := <-ai.GenerateMessageWithFiles(p.User, p.System, []string{projCtxPath})
+	logger.Info(ctx, "quest generation start", slog.Int("questCount", len(request.Quests)))
+	result := <-ai.GenerateMessageWithFiles(ctx, p.User, p.System, []string{projCtxPath})
 	if result.Err != nil {
 		return nil, fmt.Errorf("failed to generate quests: %w", result.Err)
 	}
@@ -100,25 +104,35 @@ func GenerateAndEvaluateQuests(projCtxPath string, request QuestRequest) (*Quest
 		return nil, fmt.Errorf("failed to parse quest response: %w", err)
 	}
 
+	logger.Info(ctx, "quest generation completed",
+		slog.Int("evaluations", len(response.QuestEvaluations)),
+		slog.Int("newQuests", len(response.NewQuests)),
+	)
 	return &response, nil
 }
 
 // SaveResults는 quest 평가 결과와 신규 퀘스트를 DB에 저장하고, 완료된 퀘스트 ID와 신규 퀘스트 ID를 반환합니다.
-func SaveResults(jobID int64, projectID int64, userID int64, resp *QuestResponse) (completedIDs []int64, newQuestIDs []int64) {
+func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64, resp *QuestResponse) (completedIDs []int64, newQuestIDs []int64) {
 	completedIDs = make([]int64, 0)
 	newQuestIDs = make([]int64, 0)
 
 	for _, eval := range resp.QuestEvaluations {
 		if err := db.InsertQuestEvaluation(eval.UserAiQuestID, jobID, eval.EvaluationResult, eval.ConfidenceScore, eval.Reason, eval.ProgressNote); err != nil {
-			log.Printf("[Quest] failed to insert evaluation questId=%d: %v", eval.UserAiQuestID, err)
+			logger.Error(ctx, "failed to insert quest evaluation", err, slog.Int64("questId", eval.UserAiQuestID))
 			continue
 		}
 		if err := db.UpdateQuestLastEvaluatedAt(eval.UserAiQuestID); err != nil {
-			log.Printf("[Quest] failed to update last_evaluated_at questId=%d: %v", eval.UserAiQuestID, err)
+			logger.Warn(ctx, "failed to update quest last_evaluated_at",
+				slog.Int64("questId", eval.UserAiQuestID),
+				slog.String("reason", err.Error()),
+			)
 		}
 		if eval.EvaluationResult == "COMPLETED" {
 			if err := db.CompleteQuest(eval.UserAiQuestID); err != nil {
-				log.Printf("[Quest] failed to complete quest questId=%d: %v", eval.UserAiQuestID, err)
+				logger.Warn(ctx, "failed to complete quest",
+					slog.Int64("questId", eval.UserAiQuestID),
+					slog.String("reason", err.Error()),
+				)
 			} else {
 				completedIDs = append(completedIDs, eval.UserAiQuestID)
 			}
@@ -128,12 +142,15 @@ func SaveResults(jobID int64, projectID int64, userID int64, resp *QuestResponse
 	for _, nq := range resp.NewQuests {
 		id, err := db.InsertQuest(projectID, userID, nq.Title, nq.Description, nq.Hint, nq.AIGenerationReason, nq.CompletionGuide, nq.RewardExp, nq.ExpiredAt)
 		if err != nil {
-			log.Printf("[Quest] failed to insert new quest title=%q: %v", nq.Title, err)
+			logger.Error(ctx, "failed to insert new quest", err, slog.String("title", nq.Title))
 		} else {
 			newQuestIDs = append(newQuestIDs, id)
 		}
 	}
 
-	log.Printf("[Quest] saved: %d evaluations, %d new quests", len(resp.QuestEvaluations), len(resp.NewQuests))
+	logger.Info(ctx, "quest results saved",
+		slog.Int("evaluations", len(resp.QuestEvaluations)),
+		slog.Int("newQuests", len(resp.NewQuests)),
+	)
 	return
 }

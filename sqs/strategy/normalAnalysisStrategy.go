@@ -3,9 +3,11 @@ package strategy
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strconv"
+	"time"
 	"worker_GoVer/apperrors"
 	"worker_GoVer/artifact/codeGraph"
 	"worker_GoVer/artifact/projectContext"
@@ -14,18 +16,32 @@ import (
 	"worker_GoVer/db"
 	"worker_GoVer/disk"
 	"worker_GoVer/git"
+	"worker_GoVer/logger"
 	"worker_GoVer/quest"
 	"worker_GoVer/s3"
 )
 
 func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data json.RawMessage) (*StrategyResult, error) {
+	startAt := time.Now()
+
 	var msg NormalAnalysisQueueMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, apperrors.Newf(apperrors.ErrUnmarshalMessage, 400, false, err, "failed to unmarshal NormalAnalysis message")
 	}
 
-	log.Printf("[NormalAnalysis] start jobId=%s repo=%s branch=%s isMerge=%v",
-		jobID, msg.RepositoryFullName, msg.BranchName, msg.IsMerge)
+	logger.AnalysisStarted(ctx, jobID,
+		slog.String("analysisType", "NORMAL_ANALYSIS"),
+		slog.String("repo", msg.RepositoryFullName),
+		slog.String("branch", msg.BranchName),
+		slog.Bool("isMerge", msg.IsMerge),
+	)
+	fail := func(err error) error {
+		logger.AnalysisFailed(ctx, jobID, err, time.Since(startAt).Milliseconds(),
+			slog.String("analysisType", "NORMAL_ANALYSIS"),
+			slog.String("repo", msg.RepositoryFullName),
+		)
+		return err
+	}
 
 	cfg := config.Get()
 	jobIDInt := msg.JobID
@@ -34,18 +50,27 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 	}
 
 	// 1. job 선점: ANALYSIS_JOB_QUEUED → ANALYSIS_JOB_RUNNING
+	claimStep := logger.StepStart(ctx, "job.claim", jobID)
 	claimed, err := db.ClaimAnalysisJob(jobIDInt)
 	if err != nil {
-		return nil, apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "failed to claim job jobId=%s", jobID)
+		wrapped := apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "failed to claim job jobId=%s", jobID)
+		claimStep.Fail(wrapped)
+		return nil, fail(wrapped)
 	}
 	if !claimed {
-		log.Printf("[NormalAnalysis] job already claimed or not in QUEUED state, skipping jobId=%s", jobID)
+		claimStep.Complete(slog.String("status", "skipped"))
+		logger.Warn(ctx, "analysis job already claimed, skipping")
 		return nil, nil
 	}
+	claimStep.Complete()
 
 	// 2. 디스크 정리
-	if err := disk.IfNeedDoCleanWorkspace(); err != nil {
-		log.Printf("[NormalAnalysis] workspace cleanup warning: %v", err)
+	cleanupStep := logger.StepStart(ctx, "workspace.cleanup", jobID)
+	if err := disk.IfNeedDoCleanWorkspace(ctx); err != nil {
+		cleanupStep.Fail(err)
+		logger.Warn(ctx, "workspace cleanup warning", slog.String("reason", err.Error()))
+	} else {
+		cleanupStep.Complete()
 	}
 
 	// 3. 로컬 경로 결정: WorkspaceBaseDir/{installationId}/{repoId}
@@ -55,40 +80,68 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 	)
 
 	// 4. clone or fetch
-	exists, err := disk.IsExistDir(localPath)
+	repoStep := logger.StepStart(ctx, "git.prepare", jobID, slog.String("localPath", localPath))
+	exists, err := disk.IsExistDir(ctx, localPath)
 	if err != nil {
-		return nil, apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to check dir")
+		wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to check dir")
+		repoStep.Fail(wrapped)
+		return nil, fail(wrapped)
 	}
 	if exists {
-		if err := git.Fetch(localPath, msg.PushUserInstallationID); err != nil {
-			return nil, apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to fetch repo=%s", msg.RepositoryFullName)
+		if err := git.Fetch(ctx, localPath, msg.PushUserInstallationID); err != nil {
+			wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to fetch repo=%s", msg.RepositoryFullName)
+			repoStep.Fail(wrapped)
+			return nil, fail(wrapped)
 		}
 	} else {
-		if err := git.CloneRepository(msg.PushUserInstallationID, msg.RepositoryFullName, localPath, msg.BranchName); err != nil {
-			return nil, apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to clone repo=%s branch=%s", msg.RepositoryFullName, msg.BranchName)
+		if err := git.CloneRepository(ctx, msg.PushUserInstallationID, msg.RepositoryFullName, localPath, msg.BranchName); err != nil {
+			wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to clone repo=%s branch=%s", msg.RepositoryFullName, msg.BranchName)
+			repoStep.Fail(wrapped)
+			return nil, fail(wrapped)
 		}
 	}
+	repoStep.Complete(slog.Bool("exists", exists))
 
 	// 5. 브랜치 체크아웃
-	if err := git.CheckoutBranch(localPath, msg.BranchName); err != nil {
-		return nil, apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to checkout branch=%s", msg.BranchName)
+	checkoutBranchStep := logger.StepStart(ctx, "git.checkout_branch", jobID, slog.String("branch", msg.BranchName))
+	if err := git.CheckoutBranch(ctx, localPath, msg.BranchName); err != nil {
+		wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to checkout branch=%s", msg.BranchName)
+		checkoutBranchStep.Fail(wrapped)
+		return nil, fail(wrapped)
 	}
+	checkoutBranchStep.Complete()
 
 	// 6. afterCommit checkout
-	if err := git.Checkout(localPath, msg.AfterCommit); err != nil {
-		return nil, apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to checkout afterCommit=%s", msg.AfterCommit)
+	checkoutCommitStep := logger.StepStart(ctx, "git.checkout_commit", jobID, slog.String("afterCommit", msg.AfterCommit))
+	if err := git.Checkout(ctx, localPath, msg.AfterCommit); err != nil {
+		wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to checkout afterCommit=%s", msg.AfterCommit)
+		checkoutCommitStep.Fail(wrapped)
+		return nil, fail(wrapped)
 	}
+	checkoutCommitStep.Complete()
 
 	// 7. lock
-	if locked, _ := disk.IsLocked(localPath); locked {
-		return nil, apperrors.Newf(apperrors.ErrWorkspaceLocked, 409, true, nil, "repository is locked jobId=%s", jobID)
+	lockStep := logger.StepStart(ctx, "workspace.lock", jobID)
+	locked, err := disk.IsLocked(ctx, localPath)
+	if err != nil {
+		wrapped := apperrors.Newf(apperrors.ErrWorkspaceLocked, 500, true, err, "failed to check lock jobId=%s", jobID)
+		lockStep.Fail(wrapped)
+		return nil, fail(wrapped)
 	}
-	if _, err := disk.CreateLockFileAtomic(localPath); err != nil {
-		return nil, apperrors.Newf(apperrors.ErrWorkspaceLocked, 500, true, err, "failed to acquire lock jobId=%s", jobID)
+	if locked {
+		wrapped := apperrors.Newf(apperrors.ErrWorkspaceLocked, 409, true, nil, "repository is locked jobId=%s", jobID)
+		lockStep.Fail(wrapped)
+		return nil, fail(wrapped)
 	}
+	if _, err := disk.CreateLockFileAtomic(ctx, localPath); err != nil {
+		wrapped := apperrors.Newf(apperrors.ErrWorkspaceLocked, 500, true, err, "failed to acquire lock jobId=%s", jobID)
+		lockStep.Fail(wrapped)
+		return nil, fail(wrapped)
+	}
+	lockStep.Complete()
 	defer func() {
-		if err := disk.RemoveLockAtomic(localPath); err != nil {
-			log.Printf("[NormalAnalysis] failed to remove lock: %v", err)
+		if err := disk.RemoveLockAtomic(ctx, localPath); err != nil {
+			logger.Warn(ctx, "failed to remove workspace lock", slog.String("reason", err.Error()))
 		}
 	}()
 
@@ -100,31 +153,46 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 	if latestKB == nil {
 		return nil, apperrors.Newf(apperrors.ErrNoProjectKB, 422, false, nil, "no PROJECT_KB found for projectId=%d", msg.ProjectID)
 	}
+	/*
 
-	// 8. effectiveBeforeCommit 결정
-	// 최신 KB의 afterCommitHash가 다르면 그걸 기준으로 삼는다
-	effectiveBeforeCommit := msg.BeforeCommit
+		// 8. effectiveBeforeCommit 결정
+		// 최신 KB의 afterCommitHash가 다르면 그걸 기준으로 삼는다
+		effectiveBeforeCommit := msg.BeforeCommit
+	*/
+	baseCommit := msg.BeforeCommit
 	if latestKB.AfterCommitHash != "" && latestKB.AfterCommitHash != msg.BeforeCommit {
-		effectiveBeforeCommit = latestKB.AfterCommitHash
+		baseCommit = latestKB.AfterCommitHash
 	}
 
 	// 9. baseline PROJECT_KB를 S3에서 다운로드
 	artifactDir := filepath.Join(localPath, "artifact")
-	baselinePath, err := s3.DownloadProjectKB(latestKB.S3Bucket, latestKB.StoredURL, artifactDir)
+	downloadStep := logger.StepStart(ctx, "project_context.download", jobID)
+	baselinePath, err := s3.DownloadProjectKB(ctx, latestKB.S3Bucket, latestKB.StoredURL, artifactDir)
 	if err != nil {
-		return nil, apperrors.Newf(apperrors.ErrS3Operation, 500, true, err, "failed to download baseline KB projectId=%d", msg.ProjectID)
+		wrapped := apperrors.Newf(apperrors.ErrS3Operation, 500, true, err, "failed to download baseline KB projectId=%d", msg.ProjectID)
+		downloadStep.Fail(wrapped)
+		return nil, fail(wrapped)
 	}
+	downloadStep.Complete()
 
 	// 10. git diff 생성
-	diffPath, err := git.Diff(localPath, effectiveBeforeCommit, msg.AfterCommit, msg.IsMerge)
+	diffStep := logger.StepStart(ctx, "git.diff", jobID)
+	diffPath, err := git.Diff(ctx, localPath, baseCommit, msg.AfterCommit, msg.IsMerge)
 	if err != nil {
-		return nil, apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to generate diff before=%s after=%s", effectiveBeforeCommit, msg.AfterCommit)
+		wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to generate diff before=%s after=%s", baseCommit, msg.AfterCommit)
+		diffStep.Fail(wrapped)
+		return nil, fail(wrapped)
 	}
+	diffStep.Complete()
 
 	// 11. 변경 파일 목록
-	diffFiles, err := git.DiffFileList(localPath, effectiveBeforeCommit, msg.AfterCommit, msg.IsMerge)
+	diffFileStep := logger.StepStart(ctx, "git.diff_files", jobID)
+	diffFiles, err := git.DiffFileList(ctx, localPath, baseCommit, msg.AfterCommit, msg.IsMerge)
 	if err != nil {
-		log.Printf("[NormalAnalysis] failed to get diff file list (non-fatal): %v", err)
+		diffFileStep.Fail(err)
+		logger.Warn(ctx, "failed to get diff file list", slog.String("reason", err.Error()))
+	} else {
+		diffFileStep.Complete(slog.Int("fileCount", len(diffFiles)))
 	}
 	changedPaths := make([]string, 0, len(diffFiles))
 	for _, f := range diffFiles {
@@ -135,48 +203,78 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 	}
 
 	// 12. CodeGraph 생성
-	graphPath, err := codeGraph.GenerateCodeGraph(localPath)
+	graphStep := logger.StepStart(ctx, "codegraph.generate", jobID)
+	graphPath, err := codeGraph.GenerateCodeGraph(ctx, localPath)
 	if err != nil {
-		return nil, apperrors.Newf(apperrors.ErrCodeGraphGeneration, 500, true, err, "failed to generate code graph repo=%s", msg.RepositoryFullName)
+		wrapped := apperrors.Newf(apperrors.ErrCodeGraphGeneration, 500, true, err, "failed to generate code graph repo=%s", msg.RepositoryFullName)
+		graphStep.Fail(wrapped)
+		return nil, fail(wrapped)
 	}
+	graphStep.Complete()
 
 	// 13. incremental ProjectContext 업데이트
 	kbVersion, err := db.NextReportVersion(msg.ProjectID, "PROJECT_KB")
 	if err != nil {
-		log.Printf("[NormalAnalysis] failed to get KB version (non-fatal): %v", err)
+		logger.Warn(ctx, "failed to get project KB version, defaulting to 1", slog.String("reason", err.Error()))
 		kbVersion = 1
 	}
+	updateContextStep := logger.StepStart(ctx, "project_context.update", jobID, slog.Int("version", kbVersion))
 	ctxPath, err := projectContext.UpdateProjectContext(
-		localPath, baselinePath, diffPath, graphPath, changedPaths, kbVersion,
+		ctx,
+		localPath,
+		baselinePath,
+		diffPath,
+		graphPath,
+		changedPaths,
+		baseCommit,
+		msg.AfterCommit,
+		kbVersion,
 	)
 	if err != nil {
-		return nil, apperrors.Newf(apperrors.ErrAIAnalysis, 500, true, err, "failed to update project context")
+		wrapped := apperrors.Newf(apperrors.ErrAIAnalysis, 500, true, err, "failed to update project context")
+		updateContextStep.Fail(wrapped)
+		return nil, fail(wrapped)
 	}
+	updateContextStep.Complete()
+	/*
 
-	// 14. ProjectKB S3 업로드 + DB 저장
-	prevKBID := int64(latestKB.ProjectAnalysisReportsID)
-	newKBID := projectContext.Persist(ctxPath, &prevKBID, msg.PushUserInstallationID, msg.RepositoryID, msg.ProjectID, kbVersion, cfg.AWSS3Bucket, effectiveBeforeCommit, msg.AfterCommit)
+		// 14. ProjectKB S3 업로드 + DB 저장
+		prevKBID := int64(latestKB.ProjectAnalysisReportsID)
+	*/
+	previousKBID := int64(latestKB.ProjectAnalysisReportsID)
+	persistStep := logger.StepStart(ctx, "project_context.persist", jobID, slog.Int("version", kbVersion))
+	newKBID := projectContext.Persist(ctx, ctxPath, &previousKBID, msg.PushUserInstallationID, msg.RepositoryID, msg.ProjectID, kbVersion, cfg.AWSS3Bucket, baseCommit, msg.AfterCommit)
 
 	result := &StrategyResult{}
 	if newKBID != 0 {
 		result.NewProjectKBID = &newKBID
+		persistStep.Complete(slog.Int64("projectKbId", newKBID))
+	} else {
+		persistStep.Fail(fmt.Errorf("project context persist returned 0"))
 	}
 
 	// 15. Quest 평가 및 생성
-	questReq, err := quest.BuildQuestRequest(jobIDInt, msg.ProjectID, msg.PushUserID, msg.RepositoryFullName, msg.BranchName)
+	questStep := logger.StepStart(ctx, "quest.generate", jobID)
+	questReq, err := quest.BuildQuestRequest(ctx, jobIDInt, msg.ProjectID, msg.PushUserID, msg.RepositoryFullName, msg.BranchName)
 	if err != nil {
-		log.Printf("[NormalAnalysis] failed to build quest request (non-fatal): %v", err)
+		questStep.Fail(err)
+		logger.Warn(ctx, "failed to build quest request", slog.String("reason", err.Error()))
 	} else {
-		questResp, err := quest.GenerateAndEvaluateQuests(ctxPath, questReq)
+		questResp, err := quest.GenerateAndEvaluateQuests(ctx, ctxPath, questReq)
 		if err != nil {
-			log.Printf("[NormalAnalysis] failed to generate quests (non-fatal): %v", err)
+			questStep.Fail(err)
+			logger.Warn(ctx, "failed to generate quests", slog.String("reason", err.Error()))
 		} else {
-			result.CompleteQuestIDs, result.NewQuestIDs = quest.SaveResults(jobIDInt, msg.ProjectID, msg.PushUserID, questResp)
+			result.CompleteQuestIDs, result.NewQuestIDs = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, msg.PushUserID, questResp)
+			questStep.Complete(
+				slog.Int("completedQuestCount", len(result.CompleteQuestIDs)),
+				slog.Int("newQuestCount", len(result.NewQuestIDs)),
+			)
 
 			// 16. UserView 생성
 			uvVersion, err := db.NextReportVersion(msg.ProjectID, "USER_VIEW")
 			if err != nil {
-				log.Printf("[NormalAnalysis] failed to get user view version (non-fatal): %v", err)
+				logger.Warn(ctx, "failed to get user view version, defaulting to 1", slog.String("reason", err.Error()))
 				uvVersion = 1
 			}
 			uvInput := userView.GenerateInput{
@@ -184,33 +282,49 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 				UserID:             msg.PushUserID,
 				RepositoryFullName: msg.RepositoryFullName,
 				BranchName:         msg.BranchName,
-				BeforeCommitHash:   effectiveBeforeCommit,
+				BeforeCommitHash:   baseCommit,
 				AfterCommitHash:    msg.AfterCommit,
 				Version:            uvVersion,
 				CompletedQuestIDs:  result.CompleteQuestIDs,
 				NewQuestIDs:        result.NewQuestIDs,
 			}
-			if uvPath, err := userView.Generate(uvInput, ctxPath, localPath); err != nil {
-				log.Printf("[NormalAnalysis] failed to generate user view (non-fatal): %v", err)
+			userViewStep := logger.StepStart(ctx, "user_view.generate", jobID, slog.Int("version", uvVersion))
+			if uvPath, err := userView.Generate(ctx, uvInput, ctxPath, localPath); err != nil {
+				userViewStep.Fail(err)
+				logger.Warn(ctx, "failed to generate user view", slog.String("reason", err.Error()))
 			} else {
-				uvID := userView.Persist(uvPath, result.NewProjectKBID, msg.PushUserInstallationID, msg.RepositoryID, msg.ProjectID, uvVersion, cfg.AWSS3Bucket, effectiveBeforeCommit, msg.AfterCommit)
+				uvID := userView.Persist(ctx, uvPath, result.NewProjectKBID, msg.PushUserInstallationID, msg.RepositoryID, msg.ProjectID, uvVersion, cfg.AWSS3Bucket, baseCommit, msg.AfterCommit)
 				if uvID != 0 {
 					result.UserViewReportID = &uvID
+					userViewStep.Complete(slog.Int64("userViewReportId", uvID))
+				} else {
+					userViewStep.Fail(fmt.Errorf("user view persist returned 0"))
 				}
 			}
 		}
 	}
 
 	// 17. touch 파일 업데이트
-	if _, err := disk.CreateTouchFileAtomic(localPath); err != nil {
-		log.Printf("[NormalAnalysis] failed to touch: %v", err)
+	touchStep := logger.StepStart(ctx, "workspace.touch", jobID)
+	if _, err := disk.CreateTouchFileAtomic(ctx, localPath); err != nil {
+		touchStep.Fail(err)
+		logger.Warn(ctx, "failed to update touch file", slog.String("reason", err.Error()))
+	} else {
+		touchStep.Complete()
 	}
 
 	// 18. 작업 완료: ANALYSIS_JOB_COMPLETED
+	statusStep := logger.StepStart(ctx, "job.complete", jobID)
 	if err := db.UpdateAnalysisJobStatus(jobIDInt, "ANALYSIS_JOB_COMPLETED"); err != nil {
-		log.Printf("[NormalAnalysis] failed to update job status to COMPLETED: %v", err)
+		statusStep.Fail(err)
+		logger.Warn(ctx, "failed to update analysis job status to completed", slog.String("reason", err.Error()))
+	} else {
+		statusStep.Complete()
 	}
 
-	log.Printf("[NormalAnalysis] done jobId=%s repo=%s", jobID, msg.RepositoryFullName)
+	logger.AnalysisCompleted(ctx, jobID, time.Since(startAt).Milliseconds(),
+		slog.String("analysisType", "NORMAL_ANALYSIS"),
+		slog.String("repo", msg.RepositoryFullName),
+	)
 	return result, nil
 }

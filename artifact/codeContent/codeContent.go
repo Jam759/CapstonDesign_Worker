@@ -2,25 +2,27 @@ package codeContent
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 	"worker_GoVer/artifact/codeGraph/strategy"
+	"worker_GoVer/logger"
 )
 
 const (
-	maxFileSizeBytes  = 2 * 1024 * 1024  // 파일당 최대 2MB
+	maxFileSizeBytes  = 2 * 1024 * 1024   // 파일당 최대 2MB
 	maxCacheSizeBytes = 100 * 1024 * 1024 // 캐시 총합 최대 100MB
 )
 
 // GenerateCodeContent는 코드 그래프의 각 노드에 대해 소스코드를 추출하여 저장합니다.
 // 반환값: 저장된 JSON 파일 경로
-func GenerateCodeContent(projectPath string, graph *strategy.CodeGraph) (string, error) {
-	log.Printf("[CodeContent] start: nodes=%d", len(graph.Nodes))
+func GenerateCodeContent(ctx context.Context, projectPath string, graph *strategy.CodeGraph) (string, error) {
+	logger.Info(ctx, "codeContent generation start", slog.Int("nodes", len(graph.Nodes)))
 
 	// 파일별 라인 캐시 (같은 파일을 여러 번 읽지 않도록)
 	fileCache := map[string][]string{}
@@ -31,7 +33,10 @@ func GenerateCodeContent(projectPath string, graph *strategy.CodeGraph) (string,
 	for _, node := range graph.Nodes {
 		lines, err := getFileLines(fileCache, &cacheSizeBytes, projectPath, node.FilePath)
 		if err != nil {
-			log.Printf("[CodeContent] skip node %s: %v", node.FilePath, err)
+			logger.Warn(ctx, "codeContent skip node",
+				slog.String("filePath", node.FilePath),
+				slog.String("reason", err.Error()),
+			)
 			continue
 		}
 
@@ -82,7 +87,10 @@ func GenerateCodeContent(projectPath string, graph *strategy.CodeGraph) (string,
 		return "", fmt.Errorf("failed to write code content: %w", err)
 	}
 
-	log.Printf("[CodeContent] saved: entries=%d path=%s", len(contents), savePath)
+	logger.Info(ctx, "codeContent saved",
+		slog.Int("entries", len(contents)),
+		slog.String("path", savePath),
+	)
 	return savePath, nil
 }
 

@@ -3,28 +3,31 @@ package strategy
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
 	"worker_GoVer/config"
+	"worker_GoVer/logger"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 )
 
-func (o OpenAiStrategy) GenerateMessageWithFiles(userPrompt string, systemPrompt string, filePaths []string) <-chan AiResult {
+func (o OpenAiStrategy) GenerateMessageWithFiles(ctx context.Context, userPrompt string, systemPrompt string, filePaths []string) <-chan AiResult {
 	ch := make(chan AiResult, 1)
 	go func() {
 		defer close(ch)
 		cfg := config.Get()
 		client := openai.NewClient(option.WithAPIKey(cfg.OpenAIKey))
-		ctx := context.TODO()
 
 		if len(filePaths) == 0 {
-			log.Printf("[AI] chatCompletion start model=%s", cfg.DefaultModel)
+			logger.Info(ctx, "AI chat completion start", slog.String("model", cfg.DefaultModel))
 		} else {
-			log.Printf("[AI] assistantCompletion start model=%s files=%v", cfg.DefaultModel, filePaths)
+			logger.Info(ctx, "AI assistant completion start",
+				slog.String("model", cfg.DefaultModel),
+				slog.Int("fileCount", len(filePaths)),
+			)
 		}
 
 		var data any
@@ -35,17 +38,17 @@ func (o OpenAiStrategy) GenerateMessageWithFiles(userPrompt string, systemPrompt
 			data, err = o.assistantCompletion(ctx, &client, cfg, userPrompt, systemPrompt, filePaths)
 		}
 		if err != nil {
-			log.Printf("[AI] failed: %v", err)
+			logger.Error(ctx, "AI request failed", err)
 		} else {
-			log.Printf("[AI] done")
+			logger.Info(ctx, "AI request completed", slog.String("model", cfg.DefaultModel))
 		}
 		ch <- AiResult{Data: data, Err: err}
 	}()
 	return ch
 }
 
-func (o OpenAiStrategy) GenerateMessage(userPrompt string, systemPrompt string) <-chan AiResult {
-	return o.GenerateMessageWithFiles(userPrompt, systemPrompt, []string{})
+func (o OpenAiStrategy) GenerateMessage(ctx context.Context, userPrompt string, systemPrompt string) <-chan AiResult {
+	return o.GenerateMessageWithFiles(ctx, userPrompt, systemPrompt, []string{})
 }
 
 // 파일 없을 때: Chat Completions API
@@ -68,7 +71,7 @@ func (o OpenAiStrategy) chatCompletion(ctx context.Context, client *openai.Clien
 
 // 파일 있을 때: Assistants API + code_interpreter
 func (o OpenAiStrategy) assistantCompletion(ctx context.Context, client *openai.Client, cfg *config.Config, userPrompt, systemPrompt string, filePaths []string) (any, error) {
-	log.Printf("[AI] uploading %d file(s)...", len(filePaths))
+	logger.Info(ctx, "AI file upload start", slog.Int("fileCount", len(filePaths)))
 	// 1. 파일 업로드 (goroutine 병렬)
 	type uploadResult struct {
 		fileID string
@@ -116,7 +119,7 @@ func (o OpenAiStrategy) assistantCompletion(ctx context.Context, client *openai.
 		return nil, uploadErr
 	}
 
-	log.Printf("[AI] files uploaded: %v", fileIDs)
+	logger.Info(ctx, "AI files uploaded", slog.Int("fileCount", len(fileIDs)))
 
 	// 2. Assistant 생성
 	codeInterpreterTool := openai.NewCodeInterpreterToolParam()
@@ -160,7 +163,10 @@ func (o OpenAiStrategy) assistantCompletion(ctx context.Context, client *openai.
 	}
 	defer client.Beta.Threads.Delete(ctx, thread.ID)
 
-	log.Printf("[AI] assistant=%s thread=%s created", assistant.ID, thread.ID)
+	logger.Info(ctx, "AI assistant and thread created",
+		slog.String("assistantId", assistant.ID),
+		slog.String("threadId", thread.ID),
+	)
 
 	// 5. Run 실행
 	run, err := client.Beta.Threads.Runs.New(ctx, thread.ID, openai.BetaThreadRunNewParams{
@@ -170,7 +176,7 @@ func (o OpenAiStrategy) assistantCompletion(ctx context.Context, client *openai.
 		return nil, fmt.Errorf("failed to create run: %w", err)
 	}
 
-	log.Printf("[AI] run=%s started", run.ID)
+	logger.Info(ctx, "AI run started", slog.String("runId", run.ID))
 
 	// 6. Polling (완료될 때까지 대기, 10초마다 로그)
 	pollCount := 0
@@ -182,7 +188,10 @@ func (o OpenAiStrategy) assistantCompletion(ctx context.Context, client *openai.
 		}
 		pollCount++
 		if pollCount%10 == 0 {
-			log.Printf("[AI] run=%s polling... elapsed=%ds", run.ID, pollCount)
+			logger.Info(ctx, "AI run polling",
+				slog.String("runId", run.ID),
+				slog.Int("elapsedSec", pollCount),
+			)
 		}
 	}
 

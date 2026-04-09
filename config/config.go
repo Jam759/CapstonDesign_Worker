@@ -134,5 +134,6 @@ func LoadConfig() {
 		DBMaxOpenConns:          getEnvAsInt("DB_MAX_OPEN_CONNS", 10),
 		DBMaxIdleConns:          getEnvAsInt("DB_MAX_IDLE_CONNS", 5),
 		DBConnMaxLifetimeMin:    getEnvAsInt("DB_CONN_MAX_LIFETIME_MIN", 5),
+		LogDirectory:            getEnv("LOG_DIRECTORY", "./.logs"),
 	}
 }

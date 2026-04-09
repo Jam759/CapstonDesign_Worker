@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 	"worker_GoVer/apperrors"
 	"worker_GoVer/config"
+	"worker_GoVer/logger"
 	"worker_GoVer/sqs/strategy"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -47,14 +48,14 @@ func NewConsumer() (*Consumer, error) {
 }
 
 func (c *Consumer) StartAnalysisListener(ctx context.Context) {
-	log.Println("[SQS] analysis queue listener started")
+	logger.WorkerEvent(ctx, logger.EventWorkerStarted, "analysis queue listener started")
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[SQS] shutdown: waiting for in-flight jobs...")
+			logger.WorkerEvent(ctx, logger.EventWorkerStopping, "analysis queue listener stopping")
 			c.wg.Wait()
-			log.Println("[SQS] analysis queue listener stopped")
+			logger.WorkerEvent(ctx, logger.EventWorkerStopped, "analysis queue listener stopped")
 			return
 		default:
 		}
@@ -65,7 +66,7 @@ func (c *Consumer) StartAnalysisListener(ctx context.Context) {
 			WaitTimeSeconds:     20, // long polling
 		})
 		if err != nil {
-			log.Printf("[SQS] receive error: %v", err)
+			logger.Error(ctx, "SQS receive error", err, slog.String("category", logger.CategorySQS))
 			continue
 		}
 
@@ -92,21 +93,25 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 
 	var base SqsBaseMessage
 	if err := json.Unmarshal([]byte(*body), &base); err != nil {
-		log.Printf("[SQS] failed to unmarshal base message: %v", err)
+		logger.Error(ctx, "failed to unmarshal SQS base message", err, slog.String("category", logger.CategorySQS))
 		return
 	}
 
-	log.Printf("[SQS] received jobId=%s type=%s traceId=%s", base.JobID, base.Type, base.TraceID)
+	msgCtx := logger.WithTraceID(ctx, base.TraceID)
+	msgCtx = logger.WithJobID(msgCtx, base.JobID)
+	startAt := time.Now()
+
+	logger.SQSReceived(msgCtx, base.JobID, base.Type)
 
 	s := GetStrategy(MessageType(base.Type))
 	if s == nil {
-		log.Printf("[SQS] unknown message type: %s", base.Type)
+		logger.Warn(msgCtx, "unknown SQS message type", slog.String("messageType", base.Type))
 		return
 	}
 
 	dataBytes, err := json.Marshal(base.Data)
 	if err != nil {
-		log.Printf("[SQS] failed to re-marshal data: %v", err)
+		logger.Error(msgCtx, "failed to re-marshal SQS payload", err)
 		return
 	}
 
@@ -119,8 +124,10 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 		for {
 			select {
 			case <-ticker.C:
-				if err := c.resetMessageVisibility(ctx, c.cfg.AWSAnalysisQueueURL, receiptHandle); err != nil {
-					log.Printf("[SQS] failed to extend visibility timeout jobId=%s: %v", base.JobID, err)
+				if err := c.resetMessageVisibility(msgCtx, c.cfg.AWSAnalysisQueueURL, receiptHandle); err != nil {
+					logger.Warn(msgCtx, "failed to extend SQS visibility timeout",
+						slog.String("reason", err.Error()),
+					)
 				}
 			case <-heartbeatCtx.Done():
 				return
@@ -128,9 +135,10 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 		}
 	}()
 
-	result, err := s.Handle(ctx, base.JobID, dataBytes)
+	result, err := s.Handle(msgCtx, base.JobID, dataBytes)
 	if err != nil {
-		log.Printf("[SQS] strategy handle error jobId=%s type=%s: %v", base.JobID, base.Type, err)
+		durationMs := time.Since(startAt).Milliseconds()
+		logger.SQSFailed(msgCtx, base.JobID, base.Type, err, durationMs)
 
 		var analysisErr *apperrors.AnalysisError
 		if !errors.As(err, &analysisErr) {
@@ -138,15 +146,19 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 			analysisErr = apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "unexpected error")
 		}
 		// 모든 에러: 메시지 삭제 + FAILED 알림 (알림큐에서 retryable 판단)
-		if delErr := c.deleteMessage(ctx, c.cfg.AWSAnalysisQueueURL, receiptHandle); delErr != nil {
-			log.Printf("[SQS] failed to delete message jobId=%s: %v", base.JobID, delErr)
+		if delErr := c.deleteMessage(msgCtx, c.cfg.AWSAnalysisQueueURL, receiptHandle); delErr != nil {
+			logger.Warn(msgCtx, "failed to delete SQS message after failure",
+				slog.String("reason", delErr.Error()),
+			)
 		}
-		c.publishFailNotification(ctx, base, analysisErr)
+		c.publishFailNotification(msgCtx, base, analysisErr)
 		return
 	}
 
-	if err := c.deleteMessage(ctx, c.cfg.AWSAnalysisQueueURL, receiptHandle); err != nil {
-		log.Printf("[SQS] failed to delete message jobId=%s: %v", base.JobID, err)
+	if err := c.deleteMessage(msgCtx, c.cfg.AWSAnalysisQueueURL, receiptHandle); err != nil {
+		logger.Warn(msgCtx, "failed to delete SQS message after success",
+			slog.String("reason", err.Error()),
+		)
 	}
 
 	if result != nil {
@@ -163,10 +175,12 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 			Status:    StatusSuccess,
 			Data:      successData,
 		}
-		if err := c.PublishNotification(ctx, notification); err != nil {
-			log.Printf("[SQS] failed to publish success notification jobId=%s: %v", base.JobID, err)
+		if err := c.PublishNotification(msgCtx, notification); err != nil {
+			logger.Error(msgCtx, "failed to publish success notification", err)
 		}
 	}
+
+	logger.SQSProcessed(msgCtx, base.JobID, base.Type, time.Since(startAt).Milliseconds())
 }
 
 func (c *Consumer) publishFailNotification(ctx context.Context, base SqsBaseMessage, ae *apperrors.AnalysisError) {
@@ -184,7 +198,7 @@ func (c *Consumer) publishFailNotification(ctx context.Context, base SqsBaseMess
 		Data:      failData,
 	}
 	if err := c.PublishNotification(ctx, notification); err != nil {
-		log.Printf("[SQS] failed to publish fail notification jobId=%s: %v", base.JobID, err)
+		logger.Error(ctx, "failed to publish failure notification", err)
 	}
 }
 
@@ -203,7 +217,11 @@ func (c *Consumer) PublishNotification(ctx context.Context, msg NotificationQueu
 		return fmt.Errorf("failed to publish notification: %w", err)
 	}
 
-	log.Printf("[SQS] notification published jobId=%s status=%s", msg.JobID, msg.Status)
+	logger.Info(ctx, "SQS notification published",
+		slog.String("jobId", msg.JobID),
+		slog.String("status", string(msg.Status)),
+		slog.String("eventType", string(msg.EventType)),
+	)
 	return nil
 }
 
