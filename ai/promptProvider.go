@@ -286,3 +286,43 @@ func QuestPrompt(questRequestJSON string) Prompt {
 
 	return Prompt{User: user, System: system}
 }
+
+// IncrementalProjectContextPrompt는 기존 ProjectContext를 git diff 기반으로 증분 업데이트하는 프롬프트를 생성합니다.
+// 첨부 파일: [baselineProjectContext.json, diff.patch, focusedCodeGraph.json (optional)]
+func IncrementalProjectContextPrompt(effectiveBeforeCommit, afterCommit string) Prompt {
+	user := fmt.Sprintf(`다음 파일들을 참고하여 프로젝트 분석 문서(ProjectContext)를 증분 업데이트하세요.
+
+## 입력 파일
+1. baseline-project-context.json — 이전 전체 분석 문서 (기준선)
+2. changes.diff — beforeCommit(%s) → afterCommit(%s) 사이의 git unified diff
+3. focused-code-graph.json — diff에서 변경된 파일에 집중한 코드 그래프 (없을 수 있음)
+
+## 업데이트 원칙
+- diff와 focused-code-graph를 기반으로 변경 영향이 있는 부분만 정밀하게 갱신한다
+- 변경되지 않은 모듈의 moduleDetails는 baseline 값을 그대로 유지한다
+- 변경된 파일이 속한 모듈의 moduleDetails만 재분석하여 교체한다
+- metrics는 focused-code-graph의 신규 노드/엣지를 반영하여 재계산한다
+- signals는 변경 영향을 반영하여 갱신한다
+- analysis(overview, architecture, patterns, dataFlow, qualityIndicators)는 diff 영향 범위에 한해 갱신한다
+
+## 응답 형식 (ProjectContext JSON 전체를 반환)
+{
+  "metrics": { ... },
+  "signals": { ... },
+  "analysis": {
+    "overview": "...",
+    "architecture": { "summary": "...", "layers": "...", "dependencies": "...", "entryPoints": "..." },
+    "patterns": { "concurrency": "...", "designPatterns": "...", "errorHandling": "...", "resourceManagement": "...", "security": "...", "externalIntegration": "..." },
+    "dataFlow": { "initialization": "...", "mainWorkflow": "...", "asyncBoundaries": "...", "dataFormats": "..." },
+    "qualityIndicators": { "strengths": "...", "risks": "...", "technicalDebt": "...", "maintainability": "..." }
+  },
+  "moduleDetails": [ { "module": "...", "language": "...", "summary": "...", ... } ],
+  "codeGraph": { ... },
+  "generatedAt": "..."
+}
+반드시 위 JSON 형식만 응답하세요.`, effectiveBeforeCommit, afterCommit)
+
+	system := "당신은 시니어 소프트웨어 엔지니어이자 코드 분석 전문가입니다. 기존 프로젝트 분석 문서를 git diff와 변경 파일 코드 그래프를 기반으로 증분 업데이트합니다. 변경되지 않은 부분은 baseline을 그대로 유지하고, 변경된 부분만 정밀하게 갱신합니다. 반드시 요청된 JSON 형식으로만 응답하세요."
+
+	return Prompt{User: user, System: system}
+}

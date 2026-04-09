@@ -7,3 +7,5 @@ artifact/**/*.json
 artifact/**/*.diff
 .idea/
 .vscode/
+
+.docs

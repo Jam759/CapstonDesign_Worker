@@ -101,3 +101,16 @@ type ModuleDetail struct {
 	ExternalDeps     string `json:"externalDeps"`
 	Risks            string `json:"risks"`
 }
+
+// moduleChunkInput은 청크 파일 형식입니다.
+type moduleChunkInput struct {
+	Language string            `json:"language"`
+	Modules  []moduleChunkData `json:"modules"`
+}
+
+type moduleChunkData struct {
+	Module   string            `json:"module"`
+	Nodes    []strategy.Node   `json:"nodes"`
+	Imports  []strategy.Import `json:"imports"`
+	Contents []map[string]any  `json:"contents"`
+}

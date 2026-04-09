@@ -70,8 +70,9 @@ func getInstallationToken(appJWT string, installationID int64) (string, error) {
 // CloneRepository는 GitHub App installation을 통해 repository를 clone합니다.
 // localPath: clone할 로컬 경로 (호출자가 결정)
 // repoFullName: "owner/repo" 형식
-func CloneRepository(installationID int64, repoFullName string, localPath string) error {
-	log.Printf("[Git] cloning repo=%s installationID=%d to=%s", repoFullName, installationID, localPath)
+// branchName: 클론할 브랜치명
+func CloneRepository(installationID int64, repoFullName string, localPath string, branchName string) error {
+	log.Printf("[Git] cloning repo=%s branch=%s installationID=%d to=%s", repoFullName, branchName, installationID, localPath)
 	cfg := config.Get()
 
 	// 1. Private key 파싱
@@ -95,7 +96,8 @@ func CloneRepository(installationID int64, repoFullName string, localPath string
 	// 4. Clone 실행
 	cloneURL := fmt.Sprintf("https://github.com/%s.git", repoFullName)
 	_, err = git.PlainClone(localPath, false, &git.CloneOptions{
-		URL: cloneURL,
+		URL:           cloneURL,
+		ReferenceName: plumbing.NewBranchReferenceName(branchName),
 		Auth: &githttp.BasicAuth{
 			Username: "x-access-token",
 			Password: installationToken,
@@ -107,6 +109,121 @@ func CloneRepository(installationID int64, repoFullName string, localPath string
 
 	log.Printf("[Git] clone done repo=%s", repoFullName)
 	return nil
+}
+
+// CheckoutBranch는 원격 브랜치(origin/{branchName})의 최신 커밋으로 working tree를 이동합니다.
+// clone/fetch 후 항상 호출해야 올바른 브랜치 상태가 보장됩니다.
+func CheckoutBranch(clonePath string, branchName string) error {
+	repo, err := git.PlainOpen(clonePath)
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	remoteRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", branchName), true)
+	if err != nil {
+		return fmt.Errorf("failed to resolve remote branch origin/%s: %w", branchName, err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	if err := w.Checkout(&git.CheckoutOptions{
+		Hash:  remoteRef.Hash(),
+		Force: true,
+	}); err != nil {
+		return fmt.Errorf("failed to checkout branch %s: %w", branchName, err)
+	}
+
+	return nil
+}
+
+// Checkout은 로컬 저장소를 특정 commit으로 이동합니다.
+func Checkout(clonePath string, commitSHA string) error {
+	repo, err := git.PlainOpen(clonePath)
+	if err != nil {
+		return fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	w, err := repo.Worktree()
+	if err != nil {
+		return fmt.Errorf("failed to get worktree: %w", err)
+	}
+
+	if err := w.Checkout(&git.CheckoutOptions{
+		Hash:  plumbing.NewHash(commitSHA),
+		Force: true,
+	}); err != nil {
+		return fmt.Errorf("failed to checkout %s: %w", commitSHA, err)
+	}
+
+	return nil
+}
+
+// DiffFileList는 두 commit 간 변경된 파일 목록을 반환합니다.
+func DiffFileList(clonePath, beforeCommitSHA, afterCommitSHA string, isMerge bool) ([]FileDiffStat, error) {
+	repo, err := git.PlainOpen(clonePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open repository: %w", err)
+	}
+
+	afterHash := plumbing.NewHash(afterCommitSHA)
+	afterCommit, err := repo.CommitObject(afterHash)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get after commit: %w", err)
+	}
+
+	var beforeCommit *object.Commit
+	if isMerge {
+		if afterCommit.NumParents() == 0 {
+			return nil, fmt.Errorf("merge commit has no parents")
+		}
+		beforeCommit, err = afterCommit.Parent(0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get parent commit: %w", err)
+		}
+	} else {
+		beforeHash := plumbing.NewHash(beforeCommitSHA)
+		beforeCommit, err = repo.CommitObject(beforeHash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get before commit: %w", err)
+		}
+	}
+
+	beforeTree, err := beforeCommit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get before tree: %w", err)
+	}
+	afterTree, err := afterCommit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get after tree: %w", err)
+	}
+
+	changes, err := beforeTree.Diff(afterTree)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute diff: %w", err)
+	}
+
+	stats := make([]FileDiffStat, 0, len(changes))
+	for _, change := range changes {
+		from := change.From.Name
+		to := change.To.Name
+
+		var stat FileDiffStat
+		switch {
+		case from == "" && to != "":
+			stat = FileDiffStat{Path: to, Status: "added"}
+		case from != "" && to == "":
+			stat = FileDiffStat{Path: from, Status: "deleted"}
+		case from != to:
+			stat = FileDiffStat{Path: to, PreviousPath: from, Status: "renamed"}
+		default:
+			stat = FileDiffStat{Path: to, Status: "modified"}
+		}
+		stats = append(stats, stat)
+	}
+	return stats, nil
 }
 
 // Diff는 두 commit 간의 unified diff를 반환합니다.

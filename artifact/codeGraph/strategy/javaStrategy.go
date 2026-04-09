@@ -31,8 +31,6 @@ var javaKeywords = map[string]bool{
 	"enum": true, "record": true,
 }
 
-type JavaStrategy struct{}
-
 func (j JavaStrategy) SupportedExtensions() []string {
 	return []string{".java"}
 }

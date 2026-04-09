@@ -39,3 +39,9 @@ type CodeGraphStrategy interface {
 	SupportedExtensions() []string
 	Analyze(projectPath string) (*CodeGraph, error)
 }
+
+type GoStrategy struct{}
+
+type JavaStrategy struct{}
+
+type PythonStrategy struct{}

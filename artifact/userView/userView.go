@@ -100,11 +100,12 @@ func Generate(input GenerateInput, projCtxPath string, projectPath string) (stri
 }
 
 // Persist는 userView 파일을 S3에 업로드하고 project_analysis_reports(USER_VIEW)에 저장합니다.
-func Persist(filePath string, jobID int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) {
+// 반환값: 삽입된 project_meta_reports_id (실패 시 0)
+func Persist(filePath string, jobID int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) int64 {
 	url, err := s3.UploadUserView(installationID, repoID, filePath)
 	if err != nil {
 		log.Printf("[UserView] failed to upload to S3: %v", err)
-		return
+		return 0
 	}
 
 	var sizeBytes int64
@@ -112,10 +113,11 @@ func Persist(filePath string, jobID int64, installationID int64, repoID int64, p
 		sizeBytes = info.Size()
 	}
 
-	if err := db.InsertAnalysisReport(projectID, jobID, "USER_VIEW", version, s3Bucket, url, sizeBytes, beforeCommit, afterCommit); err != nil {
+	id, err := db.InsertAnalysisReport(projectID, jobID, "USER_VIEW", version, s3Bucket, url, sizeBytes, beforeCommit, afterCommit)
+	if err != nil {
 		log.Printf("[UserView] failed to insert report: %v", err)
-	} else {
-		log.Printf("[UserView] USER_VIEW v%d saved: %s", version, url)
+		return 0
 	}
-
+	log.Printf("[UserView] USER_VIEW v%d saved: %s", version, url)
+	return id
 }

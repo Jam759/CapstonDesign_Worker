@@ -13,8 +13,6 @@ import (
 	"github.com/openai/openai-go/option"
 )
 
-type OpenAiStrategy struct{}
-
 func (o OpenAiStrategy) GenerateMessageWithFiles(userPrompt string, systemPrompt string, filePaths []string) <-chan AiResult {
 	ch := make(chan AiResult, 1)
 	go func() {

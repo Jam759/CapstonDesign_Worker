@@ -112,17 +112,138 @@ func GenerateProjectContext(projectPath string, graphPath string, contentPath st
 	}
 
 	// 7. 저장
+	return saveProjectContext(projectPath, ctx, version, seoul)
+}
+
+// UpdateProjectContext는 baseline ProjectContext를 git diff 기반으로 증분 업데이트합니다.
+// diffFiles가 없으면 CodeGraph만 교체하고 기존 분석 결과를 유지합니다.
+func UpdateProjectContext(
+	localPath string,
+	baselineKBPath string,
+	diffPath string,
+	graphPath string,
+	changedFilePaths []string,
+	version int,
+) (string, error) {
+	log.Printf("[ProjectContext] incremental update v%d changedFiles=%d", version, len(changedFilePaths))
+
+	// baseline 파싱
+	baselineData, err := os.ReadFile(baselineKBPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read baseline KB: %w", err)
+	}
+	var baseline ProjectContext
+	if err := json.Unmarshal(baselineData, &baseline); err != nil {
+		return "", fmt.Errorf("failed to parse baseline KB: %w", err)
+	}
+
+	// 신규 CodeGraph 파싱
+	graphData, err := os.ReadFile(graphPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read code graph: %w", err)
+	}
+	var graph strategy.CodeGraph
+	if err := json.Unmarshal(graphData, &graph); err != nil {
+		return "", fmt.Errorf("failed to parse code graph: %w", err)
+	}
+
+	seoul, _ := time.LoadLocation("Asia/Seoul")
+
+	// diff가 없으면 CodeGraph만 교체하고 baseline 분석 유지
+	if len(changedFilePaths) == 0 {
+		log.Printf("[ProjectContext] no changed files, reusing baseline analysis")
+		baseline.CodeGraph = &graph
+		baseline.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
+		return saveProjectContext(localPath, baseline, version, seoul)
+	}
+
+	// focused CodeGraph 생성 (변경된 파일에 속한 노드/엣지만)
+	focused := buildFocusedCodeGraph(&graph, changedFilePaths)
+	focusedPath, err := writeTempJSON("focusedGraph_*.json", focused)
+	if err != nil {
+		return "", fmt.Errorf("failed to write focused graph: %w", err)
+	}
+	defer os.Remove(focusedPath)
+
+	// AI 증분 업데이트
+	effectiveBeforeCommit := ""
+	afterCommit := ""
+	p := ai.IncrementalProjectContextPrompt(effectiveBeforeCommit, afterCommit)
+	result := <-ai.GenerateMessageWithFiles(p.User, p.System, []string{baselineKBPath, diffPath, focusedPath})
+	if result.Err != nil {
+		return "", fmt.Errorf("incremental AI analysis failed: %w", result.Err)
+	}
+
+	responseStr, ok := result.Data.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected AI response type")
+	}
+	responseStr = extractJSONObject(responseStr)
+
+	var updated ProjectContext
+	if err := json.Unmarshal([]byte(responseStr), &updated); err != nil {
+		log.Printf("[ProjectContext] failed to parse incremental response, falling back to baseline: %v", err)
+		baseline.CodeGraph = &graph
+		baseline.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
+		return saveProjectContext(localPath, baseline, version, seoul)
+	}
+
+	// CodeGraph는 항상 새로 생성된 것으로 교체
+	updated.CodeGraph = &graph
+	updated.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
+
+	return saveProjectContext(localPath, updated, version, seoul)
+}
+
+// buildFocusedCodeGraph는 변경된 파일에 속한 노드/엣지/임포트만 포함한 CodeGraph를 반환합니다.
+func buildFocusedCodeGraph(graph *strategy.CodeGraph, changedFilePaths []string) strategy.CodeGraph {
+	changedSet := make(map[string]struct{}, len(changedFilePaths))
+	for _, p := range changedFilePaths {
+		changedSet[p] = struct{}{}
+	}
+
+	focused := strategy.CodeGraph{Language: graph.Language}
+
+	// 변경된 파일에 속한 노드 수집 + 노드 ID 셋 구성
+	changedNodeIDs := make(map[string]struct{})
+	for _, node := range graph.Nodes {
+		if _, ok := changedSet[node.FilePath]; ok {
+			focused.Nodes = append(focused.Nodes, node)
+			changedNodeIDs[node.ID] = struct{}{}
+		}
+	}
+
+	// From 또는 To가 변경된 노드에 해당하는 엣지 수집
+	for _, edge := range graph.Edges {
+		_, fromChanged := changedNodeIDs[edge.From]
+		_, toChanged := changedNodeIDs[edge.To]
+		if fromChanged || toChanged {
+			focused.Edges = append(focused.Edges, edge)
+		}
+	}
+
+	for _, imp := range graph.Imports {
+		if _, ok := changedSet[imp.FilePath]; ok {
+			focused.Imports = append(focused.Imports, imp)
+		}
+	}
+
+	return focused
+}
+
+// saveProjectContext는 ProjectContext를 JSON으로 직렬화하여 artifact 디렉토리에 저장합니다.
+func saveProjectContext(localPath string, ctx ProjectContext, version int, loc *time.Location) (string, error) {
 	data, err := json.MarshalIndent(ctx, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal project context: %w", err)
 	}
 
-	artifactDir := filepath.Join(projectPath, "artifact")
+	artifactDir := filepath.Join(localPath, "artifact")
 	if err := os.MkdirAll(artifactDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create artifact dir: %w", err)
 	}
 
-	fileName := fmt.Sprintf("projectContext_v%d_%s.json", version, time.Now().In(seoul).Format("2006-01-02-15-04-05"))
+	fileName := fmt.Sprintf("projectContext_v%d_%s.json", version, time.Now().In(loc).Format("2006-01-02-15-04-05"))
 	savePath := filepath.Join(artifactDir, fileName)
 
 	if err := os.WriteFile(savePath, data, 0644); err != nil {
@@ -176,18 +297,6 @@ func chunkModulesByNodeCount(moduleNames []string, moduleNodes map[string][]stra
 	return chunks
 }
 
-// moduleChunkInput은 청크 파일 형식입니다.
-type moduleChunkInput struct {
-	Language string            `json:"language"`
-	Modules  []moduleChunkData `json:"modules"`
-}
-
-type moduleChunkData struct {
-	Module   string           `json:"module"`
-	Nodes    []strategy.Node  `json:"nodes"`
-	Imports  []strategy.Import `json:"imports"`
-	Contents []map[string]any `json:"contents"`
-}
 
 // analyzeModuleChunk는 청크에 포함된 모듈들을 파일 업로드 방식으로 AI 분석합니다.
 func analyzeModuleChunk(language string, mods []string, moduleNodes map[string][]strategy.Node, moduleImports map[string][]strategy.Import, moduleContents map[string][]map[string]any) ([]ModuleDetail, error) {
@@ -327,11 +436,12 @@ func extractJSONObject(s string) string {
 }
 
 // Persist는 projectContext 파일을 S3에 업로드하고 project_analysis_reports(PROJECT_KB)에 저장합니다.
-func Persist(filePath string, jobID int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) {
+// 반환값: 삽입된 project_meta_reports_id (실패 시 0)
+func Persist(filePath string, jobID int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) int64 {
 	url, err := s3.UploadProjectContext(installationID, repoID, filePath)
 	if err != nil {
 		log.Printf("[ProjectContext] failed to upload to S3: %v", err)
-		return
+		return 0
 	}
 
 	var sizeBytes int64
@@ -339,11 +449,13 @@ func Persist(filePath string, jobID int64, installationID int64, repoID int64, p
 		sizeBytes = info.Size()
 	}
 
-	if err := db.InsertAnalysisReport(projectID, jobID, "PROJECT_KB", version, s3Bucket, url, sizeBytes, beforeCommit, afterCommit); err != nil {
+	id, err := db.InsertAnalysisReport(projectID, jobID, "PROJECT_KB", version, s3Bucket, url, sizeBytes, beforeCommit, afterCommit)
+	if err != nil {
 		log.Printf("[ProjectContext] failed to insert report: %v", err)
-	} else {
-		log.Printf("[ProjectContext] PROJECT_KB v%d saved: %s", version, url)
+		return 0
 	}
+	log.Printf("[ProjectContext] PROJECT_KB v%d saved: %s", version, url)
+	return id
 }
 
 func groupNodesByModule(graph *strategy.CodeGraph) map[string][]strategy.Node {

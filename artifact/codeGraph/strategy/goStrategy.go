@@ -10,8 +10,6 @@ import (
 	"strings"
 )
 
-type GoStrategy struct{}
-
 func (g GoStrategy) SupportedExtensions() []string {
 	return []string{".go"}
 }

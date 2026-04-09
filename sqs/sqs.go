@@ -3,8 +3,11 @@ package sqs
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
+	"worker_GoVer/apperrors"
 	"worker_GoVer/config"
 	"worker_GoVer/sqs/strategy"
 
@@ -103,19 +106,83 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 		return
 	}
 
-	if err := s.Handle(ctx, base.JobID, dataBytes); err != nil {
+	result, err := s.Handle(ctx, base.JobID, dataBytes)
+	if err != nil {
 		log.Printf("[SQS] strategy handle error jobId=%s type=%s: %v", base.JobID, base.Type, err)
-		if visErr := c.resetMessageVisibility(ctx, c.cfg.AWSAnalysisQueueURL, receiptHandle); visErr != nil {
-			log.Printf("[SQS] failed to reset visibility jobId=%s: %v", base.JobID, visErr)
-		} else {
-			log.Printf("[SQS] message re-queued jobId=%s", base.JobID)
+
+		var analysisErr *apperrors.AnalysisError
+		if !errors.As(err, &analysisErr) {
+			// 예상치 못한 에러 → 범용 AnalysisError로 래핑
+			analysisErr = apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "unexpected error")
 		}
+		// 모든 에러: 메시지 삭제 + FAILED 알림 (알림큐에서 retryable 판단)
+		if delErr := c.deleteMessage(ctx, c.cfg.AWSAnalysisQueueURL, receiptHandle); delErr != nil {
+			log.Printf("[SQS] failed to delete message jobId=%s: %v", base.JobID, delErr)
+		}
+		c.publishFailNotification(ctx, base, analysisErr)
 		return
 	}
 
 	if err := c.deleteMessage(ctx, c.cfg.AWSAnalysisQueueURL, receiptHandle); err != nil {
 		log.Printf("[SQS] failed to delete message jobId=%s: %v", base.JobID, err)
 	}
+
+	if result != nil {
+		successData := SuccessMessage{
+			CompleteQuestIDs: result.CompleteQuestIDs,
+			NewQuestIDs:      result.NewQuestIDs,
+			NewProjectKBID:   result.NewProjectKBID,
+			UserViewReportID: result.UserViewReportID,
+		}
+		notification := NotificationQueueBaseMessage{
+			TraceID:   base.TraceID,
+			JobID:     base.JobID,
+			EventType: AnalysisEventType(base.Type),
+			Status:    StatusSuccess,
+			Data:      successData,
+		}
+		if err := c.PublishNotification(ctx, notification); err != nil {
+			log.Printf("[SQS] failed to publish success notification jobId=%s: %v", base.JobID, err)
+		}
+	}
+}
+
+func (c *Consumer) publishFailNotification(ctx context.Context, base SqsBaseMessage, ae *apperrors.AnalysisError) {
+	failData := FailMessage{
+		ErrorCode:    string(ae.Code),
+		ErrorMessage: ae.Error(),
+		HTTPStatus:   ae.HTTPStatus,
+		Retryable:    ae.Retryable,
+	}
+	notification := NotificationQueueBaseMessage{
+		TraceID:   base.TraceID,
+		JobID:     base.JobID,
+		EventType: AnalysisEventType(base.Type),
+		Status:    StatusFailed,
+		Data:      failData,
+	}
+	if err := c.PublishNotification(ctx, notification); err != nil {
+		log.Printf("[SQS] failed to publish fail notification jobId=%s: %v", base.JobID, err)
+	}
+}
+
+// PublishNotification은 알림 큐에 메시지를 발행합니다.
+func (c *Consumer) PublishNotification(ctx context.Context, msg NotificationQueueBaseMessage) error {
+	body, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal notification message: %w", err)
+	}
+
+	_, err = c.client.SendMessage(ctx, &awssqs.SendMessageInput{
+		QueueUrl:    aws.String(c.cfg.AWSNotificationQueueURL),
+		MessageBody: aws.String(string(body)),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to publish notification: %w", err)
+	}
+
+	log.Printf("[SQS] notification published jobId=%s status=%s", msg.JobID, msg.Status)
+	return nil
 }
 
 func (c *Consumer) deleteMessage(ctx context.Context, queueURL string, receiptHandle *string) error {

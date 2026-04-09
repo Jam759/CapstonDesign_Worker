@@ -18,8 +18,6 @@ var (
 	reCall       = regexp.MustCompile(`(\w[\w.]*)\s*\(`)
 )
 
-type PythonStrategy struct{}
-
 func (p PythonStrategy) SupportedExtensions() []string {
 	return []string{".py"}
 }

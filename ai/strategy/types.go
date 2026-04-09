@@ -10,3 +10,5 @@ type AiStrategy interface {
 
 	GenerateMessage(userPrompt string, systemPrompt string) <-chan AiResult
 }
+
+type OpenAiStrategy struct{}
