@@ -233,6 +233,54 @@ func ClaimAnalysisJob(jobID int64) (bool, error) {
 	return result.RowsAffected > 0, nil
 }
 
+// DeleteAnalysisReport는 project_analysis_reports 레코드를 삭제합니다. (롤백용)
+func DeleteAnalysisReport(id int64) error {
+	err := conn.Delete(&ProjectAnalysisReport{}, "project_analysis_reports_id = ?", id).Error
+	if err != nil {
+		return fmt.Errorf("failed to delete analysis report id=%d: %w", id, err)
+	}
+	return nil
+}
+
+// DeleteQuestEvaluationsByJobID는 특정 jobID에 해당하는 평가 레코드를 전부 삭제합니다. (롤백용)
+func DeleteQuestEvaluationsByJobID(jobID int64) error {
+	err := conn.Delete(&UserAiQuestEvaluation{}, "analysis_job_id = ?", jobID).Error
+	if err != nil {
+		return fmt.Errorf("failed to delete quest evaluations jobId=%d: %w", jobID, err)
+	}
+	return nil
+}
+
+// DeleteQuestsByIDs는 신규 생성된 퀘스트 레코드를 삭제합니다. (롤백용)
+func DeleteQuestsByIDs(questIDs []int64) error {
+	if len(questIDs) == 0 {
+		return nil
+	}
+	err := conn.Delete(&UserAiQuest{}, "user_ai_quest_id IN ?", questIDs).Error
+	if err != nil {
+		return fmt.Errorf("failed to delete quests ids=%v: %w", questIDs, err)
+	}
+	return nil
+}
+
+// RevertQuestCompletion은 COMPLETED 처리된 퀘스트를 ACTIVE 상태로 되돌립니다. (롤백용)
+func RevertQuestCompletion(questIDs []int64) error {
+	if len(questIDs) == 0 {
+		return nil
+	}
+	err := conn.Model(&UserAiQuest{}).
+		Where("user_ai_quest_id IN ?", questIDs).
+		Updates(map[string]any{
+			"progress_status": "ACTIVE",
+			"approval_status": "REQUEST_ACCEPT",
+			"completed_at":    nil,
+		}).Error
+	if err != nil {
+		return fmt.Errorf("failed to revert quest completion ids=%v: %w", questIDs, err)
+	}
+	return nil
+}
+
 // UpdateAnalysisJobStatus는 analysis_jobs의 job_status를 업데이트합니다.
 func UpdateAnalysisJobStatus(jobID int64, status string) error {
 	err := conn.Model(&AnalysisJob{}).

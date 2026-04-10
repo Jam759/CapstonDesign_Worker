@@ -61,7 +61,7 @@ func Init(c Config) error {
 
 	var handler slog.Handler
 	if c.Debug {
-		textH := newTextHandler(os.Stdout, slog.LevelInfo)
+		textH := newTextHandler(os.Stdout, slog.LevelDebug)
 		handler = newMultiHandler(jsonHandler, textH)
 	} else {
 		handler = jsonHandler

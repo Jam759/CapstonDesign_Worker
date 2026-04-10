@@ -3,7 +3,6 @@ package strategy
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -21,6 +20,7 @@ import (
 	"worker_GoVer/git"
 	"worker_GoVer/logger"
 	"worker_GoVer/quest"
+	"worker_GoVer/s3"
 )
 
 func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.RawMessage) (*StrategyResult, error) {
@@ -36,13 +36,6 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		slog.String("repo", msg.RepositoryFullName),
 		slog.String("branch", msg.BranchName),
 	)
-	fail := func(err error) error {
-		logger.AnalysisFailed(ctx, jobID, err, time.Since(startAt).Milliseconds(),
-			slog.String("analysisType", "FULL_SCAN_ANALYSIS_REQUEST"),
-			slog.String("repo", msg.RepositoryFullName),
-		)
-		return err
-	}
 
 	cfg := config.Get()
 	jobIDInt := msg.JobID
@@ -50,20 +43,38 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		jobIDInt, _ = strconv.ParseInt(jobID, 10, 64)
 	}
 
+	var rb rollbackList
+	jobClaimed := false
+
+	fail := func(err error) error {
+		logger.AnalysisFailed(ctx, jobID, err, time.Since(startAt).Milliseconds(),
+			slog.String("analysisType", "FULL_SCAN_ANALYSIS_REQUEST"),
+			slog.String("repo", msg.RepositoryFullName),
+		)
+		rb.Run(ctx)
+		if jobClaimed {
+			if dbErr := db.UpdateAnalysisJobStatus(jobIDInt, "ANALYSIS_JOB_FAILED"); dbErr != nil {
+				logger.Warn(ctx, "rollback: failed to mark job as FAILED", slog.String("reason", dbErr.Error()))
+			}
+		}
+		return err
+	}
+
 	// 1. job 선점: ANALYSIS_JOB_QUEUED → ANALYSIS_JOB_RUNNING
 	claimStep := logger.StepStart(ctx, "job.claim", jobID)
-	claimed, err := db.ClaimAnalysisJob(jobIDInt)
+	ok, err := db.ClaimAnalysisJob(jobIDInt)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "failed to claim job jobId=%s", jobID)
 		claimStep.Fail(wrapped)
 		return nil, fail(wrapped)
 	}
-	if !claimed {
+	if !ok {
 		claimStep.Complete(slog.String("status", "skipped"))
 		logger.Warn(ctx, "analysis job already claimed, skipping")
 		return nil, nil
 	}
 	claimStep.Complete()
+	jobClaimed = true
 
 	// 2. 디스크 정리
 	cleanupStep := logger.StepStart(ctx, "workspace.cleanup", jobID)
@@ -74,7 +85,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		cleanupStep.Complete()
 	}
 
-	// 3. 로컬 경로 결정: WorkspaceBaseDir/{installationId}/{repoId}
+	// 3. 로컬 경로 결정
 	localPath := filepath.Join(cfg.WorkspaceBaseDir,
 		strconv.FormatInt(msg.InstallationID, 10),
 		strconv.FormatInt(msg.RepositoryID, 10),
@@ -137,7 +148,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		}
 	}()
 
-	// 6. CodeGraph 생성
+	// 7. CodeGraph 생성
 	graphStep := logger.StepStart(ctx, "codegraph.generate", jobID)
 	graphPath, err := codeGraph.GenerateCodeGraph(ctx, localPath)
 	if err != nil {
@@ -147,7 +158,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 	}
 	graphStep.Complete()
 
-	// 7. CodeContent 생성
+	// 8. CodeContent 생성
 	contentStep := logger.StepStart(ctx, "codecontent.generate", jobID)
 	graphData, err := os.ReadFile(graphPath)
 	if err != nil {
@@ -169,7 +180,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 	}
 	contentStep.Complete()
 
-	// 8. ProjectContext 생성 (AI 분석, 파일로 전달)
+	// 9. ProjectContext 생성
 	ctxVersion, err := db.NextReportVersion(msg.ProjectID, "PROJECT_KB")
 	if err != nil {
 		logger.Warn(ctx, "failed to get project context version, defaulting to 1", slog.String("reason", err.Error()))
@@ -183,70 +194,102 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		return nil, fail(wrapped)
 	}
 	projectContextStep.Complete()
-	/*
 
-		// 8-1. ProjectContext S3 업로드 + DB 저장
-		newKBID := projectContext.Persist(ctx, ctxPath, nil, msg.InstallationID, msg.RepositoryID, msg.ProjectID, ctxVersion, cfg.AWSS3Bucket, "", "")
-
-	*/
-	persistStep := logger.StepStart(ctx, "project_context.persist", jobID, slog.Int("version", ctxVersion))
-	projectKBID := projectContext.Persist(ctx, ctxPath, nil, msg.InstallationID, msg.RepositoryID, msg.ProjectID, ctxVersion, cfg.AWSS3Bucket, "", "")
+	// 10. ProjectContext S3 업로드 + DB 저장
 	result := &StrategyResult{}
-	if projectKBID != 0 {
-		result.NewProjectKBID = &projectKBID
-		persistStep.Complete(slog.Int64("projectKbId", projectKBID))
-	} else {
-		persistStep.Fail(fmt.Errorf("project context persist returned 0"))
+	persistStep := logger.StepStart(ctx, "project_context.persist", jobID, slog.Int("version", ctxVersion))
+	kbID, kbURL, err := projectContext.Persist(ctx, ctxPath, nil, msg.InstallationID, msg.RepositoryID, msg.ProjectID, ctxVersion, cfg.AWSS3Bucket, "", "")
+	if err != nil {
+		persistStep.Fail(err)
+		// S3 업로드는 성공했지만 DB 실패인 경우 S3 오브젝트를 즉시 정리
+		if kbURL != "" {
+			if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, kbURL); delErr != nil {
+				logger.Warn(ctx, "rollback: failed to delete orphaned PROJECT_KB from S3", slog.String("reason", delErr.Error()))
+			}
+		}
+		return nil, fail(apperrors.Newf(apperrors.ErrS3Operation, 500, true, err, "failed to persist project context"))
 	}
+	result.NewProjectKBID = &kbID
+	persistStep.Complete(slog.Int64("projectKbId", kbID))
+	rb.Add(func() {
+		if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, kbURL); delErr != nil {
+			logger.Warn(ctx, "rollback: failed to delete PROJECT_KB from S3", slog.String("reason", delErr.Error()))
+		}
+		if delErr := db.DeleteAnalysisReport(kbID); delErr != nil {
+			logger.Warn(ctx, "rollback: failed to delete PROJECT_KB report from DB", slog.String("reason", delErr.Error()))
+		}
+	})
 
-	// 9. Quest 평가 및 생성
+	// 11. Quest 평가 및 생성
 	questStep := logger.StepStart(ctx, "quest.generate", jobID)
 	questReq, err := quest.BuildQuestRequest(ctx, jobIDInt, msg.ProjectID, msg.UserID, msg.RepositoryFullName, msg.BranchName)
 	if err != nil {
 		questStep.Fail(err)
-		logger.Warn(ctx, "failed to build quest request", slog.String("reason", err.Error()))
-	} else {
-		questResp, err := quest.GenerateAndEvaluateQuests(ctx, ctxPath, questReq)
-		if err != nil {
-			questStep.Fail(err)
-			logger.Warn(ctx, "failed to generate quests", slog.String("reason", err.Error()))
-		} else {
-			result.CompleteQuestIDs, result.NewQuestIDs = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, msg.UserID, questReq, questResp)
-			questStep.Complete(
-				slog.Int("completedQuestCount", len(result.CompleteQuestIDs)),
-				slog.Int("newQuestCount", len(result.NewQuestIDs)),
-			)
-		}
+		return nil, fail(apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "failed to build quest request"))
 	}
+	questResp, err := quest.GenerateAndEvaluateQuests(ctx, ctxPath, questReq)
+	if err != nil {
+		questStep.Fail(err)
+		return nil, fail(apperrors.Newf(apperrors.ErrAIAnalysis, 500, true, err, "failed to generate quests"))
+	}
+	result.CompleteQuestIDs, result.NewQuestIDs = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, msg.UserID, questReq, questResp)
+	rb.Add(func() {
+		if delErr := db.DeleteQuestEvaluationsByJobID(jobIDInt); delErr != nil {
+			logger.Warn(ctx, "rollback: failed to delete quest evaluations", slog.String("reason", delErr.Error()))
+		}
+		if delErr := db.DeleteQuestsByIDs(result.NewQuestIDs); delErr != nil {
+			logger.Warn(ctx, "rollback: failed to delete new quests", slog.String("reason", delErr.Error()))
+		}
+		if delErr := db.RevertQuestCompletion(result.CompleteQuestIDs); delErr != nil {
+			logger.Warn(ctx, "rollback: failed to revert quest completion", slog.String("reason", delErr.Error()))
+		}
+	})
+	questStep.Complete(
+		slog.Int("completedQuestCount", len(result.CompleteQuestIDs)),
+		slog.Int("newQuestCount", len(result.NewQuestIDs)),
+	)
 
-	// 10. UserView 생성
-	version, err := db.NextReportVersion(msg.ProjectID, "USER_VIEW")
+	// 12. UserView 생성
+	uvVersion, err := db.NextReportVersion(msg.ProjectID, "USER_VIEW")
 	if err != nil {
 		logger.Warn(ctx, "failed to get user view version, defaulting to 1", slog.String("reason", err.Error()))
-		version = 1
+		uvVersion = 1
 	}
 	uvInput := userView.GenerateInput{
 		ProjectID:          msg.ProjectID,
 		UserID:             msg.UserID,
 		RepositoryFullName: msg.RepositoryFullName,
 		BranchName:         msg.BranchName,
-		Version:            version,
+		Version:            uvVersion,
 	}
-	userViewStep := logger.StepStart(ctx, "user_view.generate", jobID, slog.Int("version", version))
-	if uvPath, err := userView.Generate(ctx, uvInput, ctxPath, localPath); err != nil {
+	userViewStep := logger.StepStart(ctx, "user_view.generate", jobID, slog.Int("version", uvVersion))
+	uvPath, err := userView.Generate(ctx, uvInput, ctxPath, localPath)
+	if err != nil {
 		userViewStep.Fail(err)
-		logger.Warn(ctx, "failed to generate user view", slog.String("reason", err.Error()))
-	} else {
-		uvID := userView.Persist(ctx, uvPath, result.NewProjectKBID, msg.InstallationID, msg.RepositoryID, msg.ProjectID, version, cfg.AWSS3Bucket, "", "")
-		if uvID != 0 {
-			result.UserViewReportID = &uvID
-			userViewStep.Complete(slog.Int64("userViewReportId", uvID))
-		} else {
-			userViewStep.Fail(fmt.Errorf("user view persist returned 0"))
-		}
+		return nil, fail(apperrors.Newf(apperrors.ErrAIAnalysis, 500, true, err, "failed to generate user view"))
 	}
+	uvID, uvURL, err := userView.Persist(ctx, uvPath, result.NewProjectKBID, msg.InstallationID, msg.RepositoryID, msg.ProjectID, uvVersion, cfg.AWSS3Bucket, "", "")
+	if err != nil {
+		userViewStep.Fail(err)
+		if uvURL != "" {
+			if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, uvURL); delErr != nil {
+				logger.Warn(ctx, "rollback: failed to delete orphaned USER_VIEW from S3", slog.String("reason", delErr.Error()))
+			}
+		}
+		return nil, fail(apperrors.Newf(apperrors.ErrS3Operation, 500, true, err, "failed to persist user view"))
+	}
+	result.UserViewReportID = &uvID
+	userViewStep.Complete(slog.Int64("userViewReportId", uvID))
+	rb.Add(func() {
+		if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, uvURL); delErr != nil {
+			logger.Warn(ctx, "rollback: failed to delete USER_VIEW from S3", slog.String("reason", delErr.Error()))
+		}
+		if delErr := db.DeleteAnalysisReport(uvID); delErr != nil {
+			logger.Warn(ctx, "rollback: failed to delete USER_VIEW report from DB", slog.String("reason", delErr.Error()))
+		}
+	})
 
-	// 11. touch 파일 업데이트
+	// 13. touch 파일 업데이트
 	touchStep := logger.StepStart(ctx, "workspace.touch", jobID)
 	if _, err := disk.CreateTouchFileAtomic(ctx, localPath); err != nil {
 		touchStep.Fail(err)
@@ -255,7 +298,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		touchStep.Complete()
 	}
 
-	// 12. 작업 완료: ANALYSIS_JOB_COMPLETED
+	// 14. 작업 완료
 	statusStep := logger.StepStart(ctx, "job.complete", jobID)
 	if err := db.UpdateAnalysisJobStatus(jobIDInt, "ANALYSIS_JOB_COMPLETED"); err != nil {
 		statusStep.Fail(err)
@@ -270,3 +313,4 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 	)
 	return result, nil
 }
+

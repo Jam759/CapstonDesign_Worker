@@ -105,12 +105,12 @@ func Generate(ctx context.Context, input GenerateInput, projCtxPath string, proj
 }
 
 // Persist는 userView 파일을 S3에 업로드하고 project_analysis_reports(USER_VIEW)에 저장합니다.
-// 반환값: 삽입된 project_analysis_reports_id (실패 시 0)
-func Persist(ctx context.Context, filePath string, newKBID *int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) int64 {
+// 반환값: (삽입된 project_analysis_reports_id, S3 URL, error)
+// S3 업로드 성공 후 DB 삽입이 실패한 경우에도 url은 반환하므로 호출자가 S3 오브젝트를 정리할 수 있습니다.
+func Persist(ctx context.Context, filePath string, newKBID *int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) (int64, string, error) {
 	url, err := s3.UploadUserView(ctx, installationID, repoID, filePath)
 	if err != nil {
-		logger.Error(ctx, "userView S3 upload failed", err)
-		return 0
+		return 0, "", fmt.Errorf("userView S3 upload failed: %w", err)
 	}
 
 	var sizeBytes int64
@@ -120,12 +120,11 @@ func Persist(ctx context.Context, filePath string, newKBID *int64, installationI
 
 	id, err := db.InsertAnalysisReport(projectID, newKBID, "USER_VIEW", version, s3Bucket, url, sizeBytes, beforeCommit, afterCommit)
 	if err != nil {
-		logger.Error(ctx, "userView DB insert failed", err)
-		return 0
+		return 0, url, fmt.Errorf("userView DB insert failed: %w", err)
 	}
 	logger.Info(ctx, "USER_VIEW saved",
 		slog.Int("version", version),
 		slog.String("url", url),
 	)
-	return id
+	return id, url, nil
 }

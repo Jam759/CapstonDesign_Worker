@@ -90,6 +90,27 @@ func DownloadProjectKB(ctx context.Context, bucket string, storedURL string, des
 	return destPath, nil
 }
 
+// DeleteObject는 S3 URL로 오브젝트를 삭제합니다.
+// storedURL 형식: https://{bucket}.s3.{region}.amazonaws.com/{key}
+func DeleteObject(ctx context.Context, bucket string, storedURL string) error {
+	const sep = ".amazonaws.com/"
+	idx := strings.Index(storedURL, sep)
+	if idx < 0 {
+		return fmt.Errorf("cannot parse S3 key from URL: %s", storedURL)
+	}
+	key := storedURL[idx+len(sep):]
+
+	logger.Info(ctx, "S3 delete start", slog.String("key", key))
+	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	}); err != nil {
+		return fmt.Errorf("failed to delete S3 object key=%s: %w", key, err)
+	}
+	logger.Info(ctx, "S3 delete done", slog.String("key", key))
+	return nil
+}
+
 func upload(ctx context.Context, key string, localFilePath string) (string, error) {
 	cfg := config.Get()
 	logger.Info(ctx, "S3 upload start", slog.String("key", key))

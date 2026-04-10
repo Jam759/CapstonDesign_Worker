@@ -211,7 +211,7 @@ func AnalysisStarted(ctx context.Context, jobID string, extra ...slog.Attr) {
 		slog.String("jobId", jobID),
 	}
 	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelInfo, "analysis started", attrs...)
+	logAttrs(ctx, slog.LevelDebug, "analysis started", attrs...)
 }
 
 // AnalysisCompleted는 분석 작업 완료를 기록합니다.
@@ -224,7 +224,7 @@ func AnalysisCompleted(ctx context.Context, jobID string, durationMs int64, extr
 		slog.Int64("durationMs", durationMs),
 	}
 	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelInfo, "analysis completed", attrs...)
+	logAttrs(ctx, slog.LevelDebug, "analysis completed", attrs...)
 }
 
 // AnalysisFailed는 분석 작업 실패를 기록합니다.
@@ -270,7 +270,7 @@ func StepStart(ctx context.Context, stepName, jobID string, extra ...slog.Attr) 
 		slog.String("stepName", stepName),
 	}
 	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelInfo, stepName+" started", attrs...)
+	logAttrs(ctx, slog.LevelDebug, stepName+" started", attrs...)
 	return &StepTimer{ctx: ctx, stepName: stepName, jobID: jobID, startAt: time.Now()}
 }
 
@@ -289,7 +289,7 @@ func (s *StepTimer) Complete(extra ...slog.Attr) {
 		slog.Int64("durationMs", durationMs),
 	}
 	attrs = append(attrs, extra...)
-	logAttrs(s.ctx, slog.LevelInfo, s.stepName+" completed", attrs...)
+	logAttrs(s.ctx, slog.LevelDebug, s.stepName+" completed", attrs...)
 }
 
 // Fail는 작업 단계의 실패를 기록합니다.
