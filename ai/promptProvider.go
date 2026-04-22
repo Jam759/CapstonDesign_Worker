@@ -169,8 +169,17 @@ func ModuleChunkPrompt() Prompt {
 
 // ProjectOverviewPrompt는 전체 프로젝트 분석 프롬프트를 생성합니다.
 // codeGraph.json, codeContent.json, moduleDetails.json, metrics.json, signals.json 파일이 첨부됩니다.
-func ProjectOverviewPrompt() Prompt {
-	user := `첨부된 파일들을 분석해주세요:
+func ProjectOverviewPrompt(projectMetadataJSON string) Prompt {
+	projectMetadataJSON = sanitize(projectMetadataJSON)
+
+	user := fmt.Sprintf(`첨부된 파일들을 분석해주세요:
+
+## 프로젝트 메타데이터
+%s
+
+위 프로젝트 제목, 설명, 목표를 우선 기준으로 삼아 코드의 목적과 핵심 흐름을 해석하세요. 코드 구조만 나열하지 말고, 이 프로젝트가 달성하려는 목표와 실제 구현 상태가 어떻게 연결되는지 설명하세요.
+
+## 입력 파일
 - codeGraph.json: 코드 구조(노드/엣지/import 관계)
 - codeContent.json: 소스코드 내용
 - moduleDetails.json: 모듈별 상세 분석 (함수/타입/변수/패턴 포함)
@@ -228,7 +237,7 @@ func ProjectOverviewPrompt() Prompt {
 }
 
 signalCorrections: 위 예시 값은 무시하고 실제 코드를 분석하여 각 신호를 true/false로 보정하세요.
-반드시 위 JSON 형식만 응답하세요.`
+반드시 위 JSON 형식만 응답하세요.`, projectMetadataJSON)
 
 	system := "당신은 시니어 소프트웨어 아키텍트입니다. 모듈별 분석 결과와 정량 메트릭, 정적 분석 신호를 종합하여 프로젝트 전체를 완전히 이해할 수 있는 상세 문서를 작성합니다. 코드를 보지 않은 시니어 개발자가 이 문서만으로 바로 기여할 수 있는 수준이어야 합니다. 모호한 표현보다 구체적 모듈명/함수명/데이터구조명을 직접 언급하세요. 반드시 요청된 JSON 형식으로만 응답하세요."
 
@@ -238,8 +247,17 @@ signalCorrections: 위 예시 값은 무시하고 실제 코드를 분석하여 
 // UserViewPrompt는 projectContext 기반으로 사용자용 분석 리포트를 생성하는 프롬프트입니다.
 // UserViewPrompt는 projectContext 파일 기반으로 사용자용 분석 리포트를 생성하는 프롬프트입니다.
 // projectContext.json 파일은 첨부 파일로 전달됩니다.
-func UserViewPrompt() Prompt {
-	user := `첨부된 projectContext.json 파일을 분석하여 개발자가 읽기 좋은 리포트를 다음 JSON 형식으로 응답해주세요:
+func UserViewPrompt(projectMetadataJSON string) Prompt {
+	projectMetadataJSON = sanitize(projectMetadataJSON)
+
+	user := fmt.Sprintf(`첨부된 projectContext.json 파일을 분석하여 개발자가 읽기 좋은 리포트를 다음 JSON 형식으로 응답해주세요:
+
+## 프로젝트 메타데이터
+%s
+
+프로젝트 설명과 목표를 기준으로 강점, 리스크, 조언을 우선순위화하세요. 단순 코드 품질 평가가 아니라 이 프로젝트 목표 달성에 직접 영향을 주는 내용을 먼저 다루세요.
+
+## 응답 형식
 {
   "headline": "프로젝트의 핵심 특징을 담은 한 줄 요약 (30자 이내, 기술스택+아키텍처 특징 중심)",
   "summary": "프로젝트 전체를 2~4문장으로 요약. 주요 기능, 아키텍처 패턴, 강점, 주의 신호 포함",
@@ -273,7 +291,7 @@ func UserViewPrompt() Prompt {
     ]
   }
 }
-반드시 위 JSON 형식만 응답하세요.`
+반드시 위 JSON 형식만 응답하세요.`, projectMetadataJSON)
 
 	system := "당신은 시니어 소프트웨어 엔지니어이자 기술 멘토입니다. 코드 분석 결과를 바탕으로 개발자가 자신의 프로젝트를 객관적으로 이해하고 성장할 수 있도록 명확하고 실용적인 피드백을 제공합니다. 점수와 등급은 근거 있게, 조언은 구체적으로 작성합니다. 반드시 요청된 JSON 형식으로만 응답하세요."
 
@@ -303,11 +321,13 @@ func QuestPrompt(questRequestJSON string) Prompt {
 
 ### 2. 새 퀘스트 생성
 프로젝트 분석 결과와 기존 퀘스트를 고려하여 새로운 개선 퀘스트를 생성합니다.
+- project.projectTitle, project.projectDescription, project.projectGoal을 우선 참고하여 프로젝트 목표 달성에 직접 기여하는 퀘스트를 생성할 것
 - 기존 퀘스트와 중복되지 않을 것
 - 프로젝트의 실제 리스크/개선점에 기반할 것
 - 구체적이고 측정 가능한 완료 기준을 제시할 것
 - rewardExp: 난이도와 영향도에 비례하는 경험치 (50~500)
 - expiredAt: 적절한 마감일 (yyyy-MM-ddTHH:mm:ss 형식)
+- roadMapMilestones가 제공된 경우 새 퀘스트마다 가장 관련 있는 milestoneKey를 relatedMilestoneKey에 넣을 것. 직접 연결할 마일스톤이 없으면 빈 문자열
 
 응답 형식:
 {
@@ -328,7 +348,8 @@ func QuestPrompt(questRequestJSON string) Prompt {
       "aiGenerationReason": "생성 이유",
       "completionGuide": "완료 기준",
       "rewardExp": 150,
-      "expiredAt": "2026-04-30T23:59:59"
+      "expiredAt": "2026-04-30T23:59:59",
+      "relatedMilestoneKey": "milestone-1-2"
     }
   ]
 }
@@ -339,10 +360,83 @@ func QuestPrompt(questRequestJSON string) Prompt {
 	return Prompt{User: user, System: system}
 }
 
+// RoadMapPrompt는 projectContext 기반으로 /{projectId}/road-map 조회 API의 원천 데이터를 생성합니다.
+// projectContext.json 파일은 첨부 파일로 전달됩니다.
+func RoadMapPrompt(projectMetadataJSON string) Prompt {
+	projectMetadataJSON = sanitize(projectMetadataJSON)
+
+	user := fmt.Sprintf(`첨부된 projectContext.json을 분석해서 프로젝트 로드맵을 생성해주세요.
+
+## 프로젝트 메타데이터
+%s
+
+## 생성 원칙
+- 이 로드맵은 /{projectId}/road-map API의 phases, milestones 응답을 만들기 위한 DB 원천 데이터입니다.
+- projectTitle, projectDescription, projectGoal을 우선 참고하여 프로젝트가 달성하려는 목표 중심으로 phase와 milestone을 설계하세요.
+- 현재 리포지토리는 이미 진행 중인 프로젝트일 수 있습니다. 구현된 기능과 코드 증거가 명확한 단계는 COMPLETED/ACHIEVED, 현재 개발 중으로 보이는 단계는 IN_PROGRESS, 미래 작업은 NOT_STARTED/PENDING으로 분류하세요.
+- 보고서체로 요약하지 말고, 팀원이 바로 실행할 수 있는 작업형 로드맵처럼 작성하세요.
+- "고도화", "개선", "안정화", "최적화", "사용자 경험 향상" 같은 포괄 표현만 단독으로 쓰지 말고, 반드시 대상 기능/화면/API/테이블/테스트/운영 절차를 붙여 구체화하세요.
+- 전체를 아주 상세하게 쪼개세요. 기본적으로 8~12개 phase, 각 phase마다 4~7개 milestone을 생성하세요.
+- 프로젝트 규모가 작아 보여도 최소 7개 phase와 최소 32개 milestone은 생성하세요. 단, 같은 의미의 milestone을 이름만 바꿔 중복 생성하지 마세요.
+- 각 phase는 개발 흐름의 큰 묶음이어야 합니다. 예: 도메인 모델 정리, 인증/권한, 핵심 사용자 흐름, 분석 파이프라인, 게이미피케이션, 알림/비동기 처리, 관측성, 테스트/릴리즈.
+- 각 milestone은 하나의 확인 가능한 작업 단위여야 합니다. 화면, API endpoint, DB relation, worker step, SQS contract, rollback path, 테스트 케이스처럼 검증 대상이 분명해야 합니다.
+- 이미 구현된 부분도 "완료됨"으로만 뭉뚱그리지 말고, 구현된 하위 기능을 여러 milestone로 나누어 ACHIEVED/IN_PROGRESS/PENDING 상태를 섞어 표현하세요.
+- phaseName과 milestoneName은 짧고 행동 지향적인 이름으로 쓰세요. 예: "Analysis job dispatch contract", "Quest milestone link migration", "Roadmap query projection".
+- milestoneIntent는 왜 필요한지, triggerCondition은 언제 시작/검증되는지, expectedState는 완료 후 관찰 가능한 결과를 구체적으로 쓰세요.
+- completionRule은 체크리스트처럼 측정 가능해야 합니다. 예: "GET /analysis/{projectId}/road-map 응답에 phase 8개 이상과 milestone 32개 이상이 포함되고, forbidden user는 403을 받는다."
+- observableEvidence는 코드/DB/API/테스트/로그에서 확인할 수 있는 증거 2~4개를 넣으세요.
+- phaseScope는 프론트에서 그대로 보여도 이해 가능한 구체적인 기능 범위 3~6개를 넣으세요.
+- phaseKey와 milestoneKey는 영문 kebab-case로 고유하게 생성하세요.
+- phase status는 "NOT_STARTED", "IN_PROGRESS", "COMPLETED", "FAILED" 중 하나만 사용하세요.
+- milestone status는 "PENDING", "IN_PROGRESS", "ACHIEVED", "FAILED" 중 하나만 사용하세요.
+- id, phaseId, milestoneIds, overallProgress는 DB/API가 계산하므로 응답하지 마세요.
+
+응답 형식:
+{
+  "phases": [
+    {
+      "phaseKey": "phase-1-foundation",
+      "phaseOrder": 1,
+      "phaseName": "Foundation",
+      "phaseObjective": "이 phase의 목표",
+      "phaseOutcome": "완료 후 기대 결과",
+      "phaseScope": ["범위 1", "범위 2"],
+      "exitCriteria": "phase 종료 기준",
+      "status": "IN_PROGRESS"
+    }
+  ],
+  "milestones": [
+    {
+      "milestoneKey": "milestone-auth-session",
+      "phaseKey": "phase-1-foundation",
+      "milestoneName": "Auth session flow",
+      "milestoneIntent": "이 마일스톤의 의도",
+      "triggerCondition": "시작 또는 평가 트리거",
+      "expectedState": "완료 후 관찰 가능한 상태",
+      "observableEvidence": ["증거 1", "증거 2"],
+      "completionRule": "완료 판정 규칙",
+      "status": "IN_PROGRESS"
+    }
+  ]
+}
+반드시 JSON 객체만 응답하세요.`, projectMetadataJSON)
+
+	system := "당신은 시니어 소프트웨어 엔지니어이자 실무형 프로젝트 로드맵 설계자입니다. 코드 분석 문서를 근거로 실제 구현 상태와 앞으로의 작업을 구분하되, 보고서식 추상 문장이 아니라 개발자가 바로 실행하고 검증할 수 있는 세부 작업 단위의 로드맵을 JSON으로만 작성합니다."
+
+	return Prompt{User: user, System: system}
+}
+
 // IncrementalProjectContextPrompt는 기존 ProjectContext를 git diff 기반으로 증분 업데이트하는 프롬프트를 생성합니다.
 // 첨부 파일: [baselineProjectContext.json, diff.patch, focusedCodeGraph.json (optional)]
-func IncrementalProjectContextPrompt(effectiveBeforeCommit, afterCommit string) Prompt {
+func IncrementalProjectContextPrompt(effectiveBeforeCommit, afterCommit string, projectMetadataJSON string) Prompt {
+	projectMetadataJSON = sanitize(projectMetadataJSON)
+
 	user := fmt.Sprintf(`다음 파일들을 참고하여 프로젝트 분석 문서(ProjectContext)를 증분 업데이트하세요.
+
+## 프로젝트 메타데이터
+%s
+
+프로젝트 제목, 설명, 목표는 변경 후 분석에서도 유지되어야 합니다. diff 해석과 리스크 판단은 이 프로젝트 목표에 미치는 영향 기준으로 우선순위를 정하세요.
 
 ## 입력 파일
 1. baseline-project-context.json — 이전 전체 분석 문서 (기준선)
@@ -372,7 +466,7 @@ func IncrementalProjectContextPrompt(effectiveBeforeCommit, afterCommit string) 
   "codeGraph": { ... },
   "generatedAt": "..."
 }
-반드시 위 JSON 형식만 응답하세요.`, effectiveBeforeCommit, afterCommit)
+반드시 위 JSON 형식만 응답하세요.`, projectMetadataJSON, effectiveBeforeCommit, afterCommit)
 
 	system := "당신은 시니어 소프트웨어 엔지니어이자 코드 분석 전문가입니다. 기존 프로젝트 분석 문서를 git diff와 변경 파일 코드 그래프를 기반으로 증분 업데이트합니다. 변경되지 않은 부분은 baseline을 그대로 유지하고, 변경된 부분만 정밀하게 갱신합니다. 반드시 요청된 JSON 형식으로만 응답하세요."
 

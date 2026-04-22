@@ -4,12 +4,19 @@ import "worker_GoVer/artifact/codeGraph/strategy"
 
 // ProjectContext는 프로젝트 전반의 분석 문서
 type ProjectContext struct {
+	Project       ProjectMetadata     `json:"project"`
 	Metrics       Metrics             `json:"metrics"`
 	Signals       Signals             `json:"signals"`
 	Analysis      Analysis            `json:"analysis"`
 	ModuleDetails []ModuleDetail      `json:"moduleDetails"`
 	CodeGraph     *strategy.CodeGraph `json:"codeGraph"`
 	GeneratedAt   string              `json:"generatedAt"`
+}
+
+type ProjectMetadata struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Goal        string `json:"goal"`
 }
 
 // Metrics는 codeGraph에서 계산된 정량 메트릭
@@ -33,18 +40,18 @@ type Metrics struct {
 
 // Signals는 정적 분석 초기값 + AI 보정된 불리언 신호
 type Signals struct {
-	HasClearModuleBoundaries      bool `json:"hasClearModuleBoundaries"`
+	HasClearModuleBoundaries       bool `json:"hasClearModuleBoundaries"`
 	HasSeparatedOrchestrationLayer bool `json:"hasSeparatedOrchestrationLayer"`
-	HasRuntimeValidation          bool `json:"hasRuntimeValidation"`
-	HasTestingIsolationIssue      bool `json:"hasTestingIsolationIssue"`
-	HasRetryConsistencyRisk       bool `json:"hasRetryConsistencyRisk"`
-	HasWorkspaceSafetyControls    bool `json:"hasWorkspaceSafetyControls"`
-	HasErrorWrapping              bool `json:"hasErrorWrapping"`
-	HasGracefulShutdown           bool `json:"hasGracefulShutdown"`
-	HasLogging                    bool `json:"hasLogging"`
-	HasAuthentication             bool `json:"hasAuthentication"`
-	HasConcurrencyControl         bool `json:"hasConcurrencyControl"`
-	HasResourceCleanup            bool `json:"hasResourceCleanup"`
+	HasRuntimeValidation           bool `json:"hasRuntimeValidation"`
+	HasTestingIsolationIssue       bool `json:"hasTestingIsolationIssue"`
+	HasRetryConsistencyRisk        bool `json:"hasRetryConsistencyRisk"`
+	HasWorkspaceSafetyControls     bool `json:"hasWorkspaceSafetyControls"`
+	HasErrorWrapping               bool `json:"hasErrorWrapping"`
+	HasGracefulShutdown            bool `json:"hasGracefulShutdown"`
+	HasLogging                     bool `json:"hasLogging"`
+	HasAuthentication              bool `json:"hasAuthentication"`
+	HasConcurrencyControl          bool `json:"hasConcurrencyControl"`
+	HasResourceCleanup             bool `json:"hasResourceCleanup"`
 }
 
 // Analysis는 AI가 생성한 정성적 분석
@@ -91,32 +98,32 @@ type QualityIndicators struct {
 
 // ModuleDetail은 모듈별 상세 정보
 type ModuleDetail struct {
-	Module               string           `json:"module"`
-	Language             string           `json:"language"`
-	Summary              string           `json:"summary"`
-	Functions            []FunctionDetail `json:"functions"`
-	Types                []TypeDetail     `json:"types"`
-	Variables            []VariableDetail `json:"variables"`
-	Imports              []ImportDetail   `json:"imports"`
-	Concurrency          string           `json:"concurrency"`
-	Patterns             string           `json:"patterns"`
-	Responsibilities     []string         `json:"responsibilities"`
-	ExternalDeps         string           `json:"externalDeps"`
-	Risks                string           `json:"risks"`
-	Coupling             string           `json:"coupling"`             // 다른 모듈과의 결합도 분석
-	TestNotes            string           `json:"testNotes"`            // 테스트 용이성, 주의사항
-	CallFlow             string           `json:"callFlow"`             // 이 모듈의 전형적인 호출 흐름
-	DataTransformations  string           `json:"dataTransformations"`  // 이 모듈에서 발생하는 데이터 변환
+	Module              string           `json:"module"`
+	Language            string           `json:"language"`
+	Summary             string           `json:"summary"`
+	Functions           []FunctionDetail `json:"functions"`
+	Types               []TypeDetail     `json:"types"`
+	Variables           []VariableDetail `json:"variables"`
+	Imports             []ImportDetail   `json:"imports"`
+	Concurrency         string           `json:"concurrency"`
+	Patterns            string           `json:"patterns"`
+	Responsibilities    []string         `json:"responsibilities"`
+	ExternalDeps        string           `json:"externalDeps"`
+	Risks               string           `json:"risks"`
+	Coupling            string           `json:"coupling"`            // 다른 모듈과의 결합도 분석
+	TestNotes           string           `json:"testNotes"`           // 테스트 용이성, 주의사항
+	CallFlow            string           `json:"callFlow"`            // 이 모듈의 전형적인 호출 흐름
+	DataTransformations string           `json:"dataTransformations"` // 이 모듈에서 발생하는 데이터 변환
 }
 
 type FunctionDetail struct {
 	Name        string        `json:"name"`
-	Visibility  string        `json:"visibility"`  // exported / unexported
+	Visibility  string        `json:"visibility"` // exported / unexported
 	Description string        `json:"description"`
 	Parameters  []ParamDetail `json:"parameters,omitempty"`
 	Returns     string        `json:"returns"`
 	IsAsync     bool          `json:"isAsync"`
-	Complexity  string        `json:"complexity"`  // low/medium/high + 한 줄 이유
+	Complexity  string        `json:"complexity"` // low/medium/high + 한 줄 이유
 	SideEffects string        `json:"sideEffects"`
 	Calls       []string      `json:"calls,omitempty"`
 	CalledBy    []string      `json:"calledBy,omitempty"`

@@ -13,6 +13,7 @@ import (
 	"worker_GoVer/artifact/codeGraph"
 	codeGraphStrategy "worker_GoVer/artifact/codeGraph/strategy"
 	"worker_GoVer/artifact/projectContext"
+	"worker_GoVer/artifact/roadmap"
 	"worker_GoVer/artifact/userView"
 	"worker_GoVer/config"
 	"worker_GoVer/db"
@@ -23,14 +24,19 @@ import (
 	"worker_GoVer/s3"
 )
 
-func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.RawMessage) (*StrategyResult, error) {
+func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*StrategyResult, error) {
 	startAt := time.Now()
 
+	dataBytes, err := json.Marshal(base.Data)
+	if err != nil {
+		return nil, apperrors.Newf(apperrors.ErrUnmarshalMessage, 400, false, err, "failed to marshal FullScan data")
+	}
 	var msg FullScanQueueMessage
-	if err := json.Unmarshal(data, &msg); err != nil {
+	if err := json.Unmarshal(dataBytes, &msg); err != nil {
 		return nil, apperrors.Newf(apperrors.ErrUnmarshalMessage, 400, false, err, "failed to unmarshal FullScan message")
 	}
 
+	jobID := base.JobID
 	logger.AnalysisStarted(ctx, jobID,
 		slog.String("analysisType", "FULL_SCAN_ANALYSIS_REQUEST"),
 		slog.String("repo", msg.RepositoryFullName),
@@ -38,9 +44,11 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 	)
 
 	cfg := config.Get()
-	jobIDInt := msg.JobID
-	if jobIDInt == 0 {
-		jobIDInt, _ = strconv.ParseInt(jobID, 10, 64)
+	jobIDInt, _ := strconv.ParseInt(jobID, 10, 64)
+	projectMeta := projectContext.ProjectMetadata{
+		Title:       msg.ProjectTitle,
+		Description: msg.ProjectDescription,
+		Goal:        msg.ProjectGoal,
 	}
 
 	var rb rollbackList
@@ -53,8 +61,8 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		)
 		rb.Run(ctx)
 		if jobClaimed {
-			if dbErr := db.UpdateAnalysisJobStatus(jobIDInt, "ANALYSIS_JOB_FAILED"); dbErr != nil {
-				logger.Warn(ctx, "rollback: failed to mark job as FAILED", slog.String("reason", dbErr.Error()))
+			if dbErr := db.UpdateAnalysisJobStatus(jobIDInt, "NOTIFICATION_QUEUED"); dbErr != nil {
+				logger.Warn(ctx, "rollback: failed to mark job as NOTIFICATION_QUEUED", slog.String("reason", dbErr.Error()))
 			}
 		}
 		return err
@@ -187,7 +195,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		ctxVersion = 1
 	}
 	projectContextStep := logger.StepStart(ctx, "project_context.generate", jobID, slog.Int("version", ctxVersion))
-	ctxPath, err := projectContext.GenerateProjectContext(ctx, localPath, graphPath, contentPath, ctxVersion)
+	ctxPath, err := projectContext.GenerateProjectContext(ctx, localPath, graphPath, contentPath, ctxVersion, projectMeta)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrAIAnalysis, 500, true, err, "failed to generate project context")
 		projectContextStep.Fail(wrapped)
@@ -220,19 +228,42 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		}
 	})
 
-	// 11. Quest 평가 및 생성
+	// 11. RoadMap AI 생성 (DB replace는 user view 저장 이후 수행)
+	roadMapStep := logger.StepStart(ctx, "roadmap.generate", jobID)
+	roadMapPlan, err := roadmap.Generate(ctx, roadmap.GenerateInput{
+		ProjectID:          msg.ProjectID,
+		UserID:             base.UserID,
+		ProjectTitle:       msg.ProjectTitle,
+		ProjectDescription: msg.ProjectDescription,
+		ProjectGoal:        msg.ProjectGoal,
+		RepositoryFullName: msg.RepositoryFullName,
+		BranchName:         msg.BranchName,
+	}, ctxPath)
+	if err != nil {
+		wrapped := apperrors.Newf(apperrors.ErrAIAnalysis, 500, true, err, "failed to generate roadmap")
+		roadMapStep.Fail(wrapped)
+		return nil, fail(wrapped)
+	}
+	roadMapStep.Complete(
+		slog.Int("phaseCount", len(roadMapPlan.Phases)),
+		slog.Int("milestoneCount", len(roadMapPlan.Milestones)),
+	)
+
+	// 12. Quest 평가 및 생성
 	questStep := logger.StepStart(ctx, "quest.generate", jobID)
-	questReq, err := quest.BuildQuestRequest(ctx, jobIDInt, msg.ProjectID, msg.UserID, msg.RepositoryFullName, msg.BranchName)
+	questReq, err := quest.BuildQuestRequest(ctx, jobIDInt, msg.ProjectID, base.UserID, msg.ProjectTitle, msg.ProjectDescription, msg.ProjectGoal, msg.RepositoryFullName, msg.BranchName)
 	if err != nil {
 		questStep.Fail(err)
 		return nil, fail(apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "failed to build quest request"))
 	}
+	questReq.RoadMapMilestones = roadMapPlan.ToQuestMilestones()
 	questResp, err := quest.GenerateAndEvaluateQuests(ctx, ctxPath, questReq)
 	if err != nil {
 		questStep.Fail(err)
 		return nil, fail(apperrors.Newf(apperrors.ErrAIAnalysis, 500, true, err, "failed to generate quests"))
 	}
-	result.CompleteQuestIDs, result.NewQuestIDs = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, msg.UserID, questReq, questResp)
+	var questMilestoneLinks []db.QuestMilestoneLinkInput
+	result.CompleteQuestIDs, result.NewQuestIDs, questMilestoneLinks = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, base.UserID, questReq, questResp)
 	rb.Add(func() {
 		if delErr := db.DeleteQuestEvaluationsByJobID(jobIDInt); delErr != nil {
 			logger.Warn(ctx, "rollback: failed to delete quest evaluations", slog.String("reason", delErr.Error()))
@@ -249,7 +280,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		slog.Int("newQuestCount", len(result.NewQuestIDs)),
 	)
 
-	// 12. UserView 생성
+	// 13. UserView 생성
 	uvVersion, err := db.NextReportVersion(msg.ProjectID, "USER_VIEW")
 	if err != nil {
 		logger.Warn(ctx, "failed to get user view version, defaulting to 1", slog.String("reason", err.Error()))
@@ -257,7 +288,10 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 	}
 	uvInput := userView.GenerateInput{
 		ProjectID:          msg.ProjectID,
-		UserID:             msg.UserID,
+		UserID:             base.UserID,
+		ProjectTitle:       msg.ProjectTitle,
+		ProjectDescription: msg.ProjectDescription,
+		ProjectGoal:        msg.ProjectGoal,
 		RepositoryFullName: msg.RepositoryFullName,
 		BranchName:         msg.BranchName,
 		Version:            uvVersion,
@@ -289,7 +323,22 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		}
 	})
 
-	// 13. touch 파일 업데이트
+	// 14. RoadMap DB replace + 신규 퀘스트 milestone 연결
+	roadMapPersistStep := logger.StepStart(ctx, "roadmap.persist", jobID)
+	roadMapSaveResult, err := roadmap.Persist(ctx, msg.ProjectID, roadMapPlan, questMilestoneLinks)
+	if err != nil {
+		wrapped := apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "failed to persist roadmap")
+		roadMapPersistStep.Fail(wrapped)
+		return nil, fail(wrapped)
+	}
+	roadMapPersistStep.Complete(
+		slog.Int("phaseCount", len(roadMapSaveResult.PhaseIDs)),
+		slog.Int("milestoneCount", len(roadMapSaveResult.MilestoneIDs)),
+		slog.Int("linkedQuestCount", len(roadMapSaveResult.LinkedQuestIDs)),
+		slog.Int("skippedQuestLinkCount", len(roadMapSaveResult.SkippedQuestLinks)),
+	)
+
+	// 15. touch 파일 업데이트
 	touchStep := logger.StepStart(ctx, "workspace.touch", jobID)
 	if _, err := disk.CreateTouchFileAtomic(ctx, localPath); err != nil {
 		touchStep.Fail(err)
@@ -298,7 +347,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 		touchStep.Complete()
 	}
 
-	// 14. 작업 완료
+	// 16. 작업 완료
 	statusStep := logger.StepStart(ctx, "job.complete", jobID)
 	if err := db.UpdateAnalysisJobStatus(jobIDInt, "ANALYSIS_JOB_COMPLETED"); err != nil {
 		statusStep.Fail(err)
@@ -313,4 +362,3 @@ func (s FullScanStrategy) Handle(ctx context.Context, jobID string, data json.Ra
 	)
 	return result, nil
 }
-

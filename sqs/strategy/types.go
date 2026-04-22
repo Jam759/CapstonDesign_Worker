@@ -2,8 +2,16 @@ package strategy
 
 import (
 	"context"
-	"encoding/json"
 )
+
+// SqsBaseMessage는 SQS 메시지 공통 래퍼
+type SqsBaseMessage struct {
+	TraceID string `json:"traceId"`
+	JobID   string `json:"jobId"`
+	UserID  int64  `json:"userId"`
+	Type    string `json:"type"`
+	Data    any    `json:"data"`
+}
 
 // StrategyResult는 strategy 성공 시 알림 큐에 전달할 결과값
 type StrategyResult struct {
@@ -14,7 +22,7 @@ type StrategyResult struct {
 }
 
 type SqsStrategy interface {
-	Handle(ctx context.Context, jobID string, data json.RawMessage) (*StrategyResult, error)
+	Handle(ctx context.Context, base SqsBaseMessage) (*StrategyResult, error)
 }
 
 type FullScanStrategy struct{}
@@ -29,8 +37,9 @@ type FullScanQueueMessage struct {
 	InstallationID     int64  `json:"installationId"`
 	IsPrivate          bool   `json:"isPrivate"`
 	ProjectID          int64  `json:"projectId"`
-	UserID             int64  `json:"userId"`
-	JobID              int64  `json:"jobId"`
+	ProjectTitle       string `json:"projectTitle"`
+	ProjectDescription string `json:"projectDescription"`
+	ProjectGoal        string `json:"projectGoal"`
 }
 
 // NormalAnalysisQueueMessage는 일반 분석 큐 메시지 데이터
@@ -43,7 +52,8 @@ type NormalAnalysisQueueMessage struct {
 	BranchName             string `json:"branchName"`
 	IsPrivate              bool   `json:"isPrivate"`
 	ProjectID              int64  `json:"projectId"`
-	PushUserID             int64  `json:"pushUserId"`
+	ProjectTitle           string `json:"projectTitle"`
+	ProjectDescription     string `json:"projectDescription"`
+	ProjectGoal            string `json:"projectGoal"`
 	IsMerge                bool   `json:"isMerge"`
-	JobID                  int64  `json:"jobId"`
 }

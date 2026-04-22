@@ -33,7 +33,7 @@ func Generate(ctx context.Context, input GenerateInput, projCtxPath string, proj
 		slog.Int64("userId", input.UserID),
 	)
 
-	p := ai.UserViewPrompt()
+	p := ai.UserViewPrompt(projectMetadataPromptJSON(input))
 	result := <-ai.GenerateMessageWithFiles(ctx, p.User, p.System, []string{projCtxPath})
 	if result.Err != nil {
 		return "", fmt.Errorf("AI generation failed: %w", result.Err)
@@ -66,6 +66,9 @@ func Generate(ctx context.Context, input GenerateInput, projCtxPath string, proj
 		Scope: Scope{
 			ProjectID:          input.ProjectID,
 			UserID:             input.UserID,
+			ProjectTitle:       input.ProjectTitle,
+			ProjectDescription: input.ProjectDescription,
+			ProjectGoal:        input.ProjectGoal,
 			RepositoryFullName: input.RepositoryFullName,
 			BranchName:         input.BranchName,
 			BeforeCommitHash:   input.BeforeCommitHash,
@@ -107,6 +110,22 @@ func Generate(ctx context.Context, input GenerateInput, projCtxPath string, proj
 // Persist는 userView 파일을 S3에 업로드하고 project_analysis_reports(USER_VIEW)에 저장합니다.
 // 반환값: (삽입된 project_analysis_reports_id, S3 URL, error)
 // S3 업로드 성공 후 DB 삽입이 실패한 경우에도 url은 반환하므로 호출자가 S3 오브젝트를 정리할 수 있습니다.
+func projectMetadataPromptJSON(input GenerateInput) string {
+	data, err := json.Marshal(struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Goal        string `json:"goal"`
+	}{
+		Title:       input.ProjectTitle,
+		Description: input.ProjectDescription,
+		Goal:        input.ProjectGoal,
+	})
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
 func Persist(ctx context.Context, filePath string, newKBID *int64, installationID int64, repoID int64, projectID int64, version int, s3Bucket string, beforeCommit string, afterCommit string) (int64, string, error) {
 	url, err := s3.UploadUserView(ctx, installationID, repoID, filePath)
 	if err != nil {

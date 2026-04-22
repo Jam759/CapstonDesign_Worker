@@ -18,26 +18,22 @@ type Consumer struct {
 	client *sqs.Client
 	cfg    *config.Config
 	sem    chan struct{}
-	wg     sync.WaitGroup // 진행 중인 모든 작업 추적 (graceful shutdown용)
+	wg     sync.WaitGroup
 }
 
-// SqsBaseMessage는 SQS 메시지 공통 래퍼
-type SqsBaseMessage struct {
+// AnalysisQueueMessage is the producer contract from the main server.
+type AnalysisQueueMessage struct {
 	TraceID string `json:"traceId"`
 	JobID   string `json:"jobId"`
-	Type    string `json:"type"`
-	Data    any    `json:"data"`
 }
 
-// AnalysisEventType은 분석 이벤트 타입
 type AnalysisEventType string
 
 const (
-	EventFullScan      AnalysisEventType = "FULL_SCAN_ANALYSIS_REQUEST"
+	EventFullScan       AnalysisEventType = "FULL_SCAN_ANALYSIS_REQUEST"
 	EventNormalAnalysis AnalysisEventType = "NORMAL_ANALYSIS_REQUEST"
 )
 
-// AnalysisStatus는 분석 작업 결과 상태
 type AnalysisStatus string
 
 const (
@@ -45,16 +41,15 @@ const (
 	StatusFailed  AnalysisStatus = "FAILED"
 )
 
-// NotificationQueueBaseMessage는 알림 큐에 발행하는 메시지 래퍼
 type NotificationQueueBaseMessage struct {
 	TraceID   string            `json:"traceId"`
-	JobID     string            `json:"jobId"`
+	JobID     int64             `json:"jobId"`
+	UserID    int64             `json:"userId"`
 	EventType AnalysisEventType `json:"eventType"`
 	Status    AnalysisStatus    `json:"status"`
 	Data      any               `json:"data"`
 }
 
-// SuccessMessage는 분석 성공 시 알림 큐에 담기는 데이터
 type SuccessMessage struct {
 	CompleteQuestIDs []int64 `json:"completeQuestIds"`
 	NewQuestIDs      []int64 `json:"newQuestIds"`
@@ -62,11 +57,9 @@ type SuccessMessage struct {
 	UserViewReportID *int64  `json:"userViewReportId"`
 }
 
-// FailMessage는 분석 실패 시 알림 큐에 담기는 데이터
 type FailMessage struct {
 	ErrorCode    string `json:"errorCode"`
 	ErrorMessage string `json:"errorMessage"`
 	HTTPStatus   int    `json:"HTTPStatus"`
 	Retryable    bool   `json:"retryable"`
 }
-

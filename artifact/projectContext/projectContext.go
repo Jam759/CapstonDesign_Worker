@@ -21,7 +21,7 @@ import (
 
 // GenerateProjectContext는 codeGraph + codeContent 기반으로 프로젝트 분석 문서를 생성합니다.
 // 흐름: metrics 계산 → signals 정적 분석 → 모듈별 AI 분석(병렬) → 전체 AI 분석 + signals 보정 → 저장
-func GenerateProjectContext(ctx context.Context, projectPath string, graphPath string, contentPath string, version int) (string, error) {
+func GenerateProjectContext(ctx context.Context, projectPath string, graphPath string, contentPath string, version int, project ProjectMetadata) (string, error) {
 	logger.Info(ctx, "projectContext generation start", slog.Int("version", version))
 
 	// 파일 읽기
@@ -102,7 +102,7 @@ func GenerateProjectContext(ctx context.Context, projectPath string, graphPath s
 
 	// 5. 전체 프로젝트 분석 + signals AI 보정 (파일 전달)
 	logger.Info(ctx, "generating overview")
-	analysis, correctedSignals, err := generateOverview(ctx, details, &graph, metrics, signals, graphPath, contentPath)
+	analysis, correctedSignals, err := generateOverview(ctx, details, &graph, metrics, signals, graphPath, contentPath, project)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate overview: %w", err)
 	}
@@ -115,6 +115,7 @@ func GenerateProjectContext(ctx context.Context, projectPath string, graphPath s
 	// 6. ProjectContext 조립
 	seoul, _ := time.LoadLocation("Asia/Seoul")
 	pctx := ProjectContext{
+		Project:       project,
 		Metrics:       metrics,
 		Signals:       signals,
 		Analysis:      *analysis,
@@ -139,6 +140,7 @@ func UpdateProjectContext(
 	beforeCommit string,
 	afterCommit string,
 	version int,
+	project ProjectMetadata,
 ) (string, error) {
 	logger.Info(ctx, "projectContext incremental update start",
 		slog.Int("version", version),
@@ -170,6 +172,7 @@ func UpdateProjectContext(
 	// diff가 없으면 CodeGraph만 교체하고 baseline 분석 유지
 	if len(changedFilePaths) == 0 {
 		logger.Info(ctx, "no changed files, reusing baseline analysis")
+		baseline.Project = project
 		baseline.CodeGraph = &graph
 		baseline.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
 		return saveProjectContext(ctx, localPath, baseline, version, seoul)
@@ -184,7 +187,7 @@ func UpdateProjectContext(
 	defer os.Remove(focusedPath)
 
 	// AI 증분 업데이트 (실제 커밋 해시를 프롬프트에 전달)
-	p := ai.IncrementalProjectContextPrompt(beforeCommit, afterCommit)
+	p := ai.IncrementalProjectContextPrompt(beforeCommit, afterCommit, projectMetadataPromptJSON(project))
 	result := <-ai.GenerateMessageWithFiles(ctx, p.User, p.System, []string{baselineKBPath, diffPath, focusedPath})
 	if result.Err != nil {
 		return "", fmt.Errorf("incremental AI analysis failed: %w", result.Err)
@@ -201,12 +204,14 @@ func UpdateProjectContext(
 		logger.Warn(ctx, "failed to parse incremental response, falling back to baseline",
 			slog.String("reason", err.Error()),
 		)
+		baseline.Project = project
 		baseline.CodeGraph = &graph
 		baseline.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
 		return saveProjectContext(ctx, localPath, baseline, version, seoul)
 	}
 
 	// CodeGraph는 항상 새로 생성된 것으로 교체
+	updated.Project = project
 	updated.CodeGraph = &graph
 	updated.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
 
@@ -368,7 +373,7 @@ func analyzeModuleChunk(ctx context.Context, language string, mods []string, mod
 }
 
 // 전체 프로젝트 분석 + signals 보정 (모든 데이터 파일로 전달)
-func generateOverview(ctx context.Context, details []ModuleDetail, graph *strategy.CodeGraph, metrics Metrics, signals Signals, graphPath string, contentPath string) (*Analysis, *Signals, error) {
+func generateOverview(ctx context.Context, details []ModuleDetail, graph *strategy.CodeGraph, metrics Metrics, signals Signals, graphPath string, contentPath string, project ProjectMetadata) (*Analysis, *Signals, error) {
 	detailsPath, err := writeTempJSON("moduleDetails_*.json", details)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to write module details: %w", err)
@@ -387,7 +392,7 @@ func generateOverview(ctx context.Context, details []ModuleDetail, graph *strate
 	}
 	defer os.Remove(signalsPath)
 
-	p := ai.ProjectOverviewPrompt()
+	p := ai.ProjectOverviewPrompt(projectMetadataPromptJSON(project))
 	result := <-ai.GenerateMessageWithFiles(ctx, p.User, p.System, []string{graphPath, contentPath, detailsPath, metricsPath, signalsPath})
 	if result.Err != nil {
 		return nil, nil, result.Err
@@ -426,6 +431,14 @@ func generateOverview(ctx context.Context, details []ModuleDetail, graph *strate
 }
 
 // cleanTrailingCommas는 JSON에서 AI가 삽입하는 trailing comma를 제거합니다.
+func projectMetadataPromptJSON(project ProjectMetadata) string {
+	data, err := json.Marshal(project)
+	if err != nil {
+		return "{}"
+	}
+	return string(data)
+}
+
 var trailingCommaRe = regexp.MustCompile(`,\s*([}\]])`)
 
 func cleanTrailingCommas(s string) string {

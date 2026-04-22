@@ -1,0 +1,218 @@
+package roadmap
+
+import (
+	"fmt"
+	"strings"
+	"unicode/utf8"
+	"worker_GoVer/db"
+	"worker_GoVer/quest"
+)
+
+type GenerateInput struct {
+	ProjectID          int64  `json:"projectId"`
+	UserID             int64  `json:"userId"`
+	RepositoryFullName string `json:"repositoryFullName"`
+	BranchName         string `json:"branchName"`
+}
+
+type Plan struct {
+	Phases     []Phase     `json:"phases"`
+	Milestones []Milestone `json:"milestones"`
+}
+
+type Phase struct {
+	PhaseKey       string   `json:"phaseKey"`
+	PhaseOrder     int      `json:"phaseOrder"`
+	PhaseName      string   `json:"phaseName"`
+	PhaseObjective string   `json:"phaseObjective"`
+	PhaseOutcome   string   `json:"phaseOutcome"`
+	PhaseScope     []string `json:"phaseScope"`
+	ExitCriteria   string   `json:"exitCriteria"`
+	Status         string   `json:"status"`
+}
+
+type Milestone struct {
+	MilestoneKey      string   `json:"milestoneKey"`
+	PhaseKey          string   `json:"phaseKey"`
+	MilestoneName     string   `json:"milestoneName"`
+	MilestoneIntent   string   `json:"milestoneIntent"`
+	TriggerCondition  string   `json:"triggerCondition"`
+	ExpectedState     string   `json:"expectedState"`
+	ObservableEvidence []string `json:"observableEvidence"`
+	CompletionRule     string   `json:"completionRule"`
+	Status             string   `json:"status"`
+}
+
+func (p *Plan) Normalize() error {
+	if len(p.Phases) == 0 {
+		return fmt.Errorf("roadmap has no phases")
+	}
+
+	phaseKeys := make(map[string]struct{}, len(p.Phases))
+	for i := range p.Phases {
+		phase := &p.Phases[i]
+		phase.PhaseKey = strings.TrimSpace(phase.PhaseKey)
+		if phase.PhaseKey == "" {
+			phase.PhaseKey = fmt.Sprintf("phase-%d", i+1)
+		}
+		if _, exists := phaseKeys[phase.PhaseKey]; exists {
+			phase.PhaseKey = fmt.Sprintf("%s-%d", phase.PhaseKey, i+1)
+		}
+		phaseKeys[phase.PhaseKey] = struct{}{}
+
+		if phase.PhaseOrder <= 0 {
+			phase.PhaseOrder = i + 1
+		}
+		phase.PhaseName = requiredText(phase.PhaseName, fmt.Sprintf("Phase %d", phase.PhaseOrder), 100)
+		phase.PhaseObjective = strings.TrimSpace(phase.PhaseObjective)
+		phase.PhaseOutcome = strings.TrimSpace(phase.PhaseOutcome)
+		phase.ExitCriteria = strings.TrimSpace(phase.ExitCriteria)
+		phase.Status = normalizePhaseStatus(phase.Status)
+		phase.PhaseScope = compactStrings(phase.PhaseScope)
+		if len(phase.PhaseScope) == 0 {
+			phase.PhaseScope = []string{phase.PhaseName}
+		}
+	}
+
+	if len(p.Milestones) == 0 {
+		return fmt.Errorf("roadmap has no milestones")
+	}
+
+	firstPhaseKey := p.Phases[0].PhaseKey
+	milestoneKeys := make(map[string]struct{}, len(p.Milestones))
+	for i := range p.Milestones {
+		milestone := &p.Milestones[i]
+		milestone.MilestoneKey = strings.TrimSpace(milestone.MilestoneKey)
+		if milestone.MilestoneKey == "" {
+			milestone.MilestoneKey = fmt.Sprintf("milestone-%d", i+1)
+		}
+		if _, exists := milestoneKeys[milestone.MilestoneKey]; exists {
+			milestone.MilestoneKey = fmt.Sprintf("%s-%d", milestone.MilestoneKey, i+1)
+		}
+		milestoneKeys[milestone.MilestoneKey] = struct{}{}
+
+		milestone.PhaseKey = strings.TrimSpace(milestone.PhaseKey)
+		if _, ok := phaseKeys[milestone.PhaseKey]; !ok {
+			milestone.PhaseKey = firstPhaseKey
+		}
+		milestone.MilestoneName = requiredText(milestone.MilestoneName, fmt.Sprintf("Milestone %d", i+1), 100)
+		milestone.MilestoneIntent = strings.TrimSpace(milestone.MilestoneIntent)
+		milestone.TriggerCondition = strings.TrimSpace(milestone.TriggerCondition)
+		milestone.ExpectedState = strings.TrimSpace(milestone.ExpectedState)
+		milestone.CompletionRule = strings.TrimSpace(milestone.CompletionRule)
+		milestone.Status = normalizeMilestoneStatus(milestone.Status)
+		milestone.ObservableEvidence = compactStrings(milestone.ObservableEvidence)
+		if len(milestone.ObservableEvidence) == 0 {
+			milestone.ObservableEvidence = []string{milestone.CompletionRule}
+		}
+	}
+
+	return nil
+}
+
+func (p Plan) ToDBInputs() []db.RoadMapPhaseInput {
+	milestonesByPhaseKey := make(map[string][]db.RoadMapMilestoneInput, len(p.Phases))
+	for _, milestone := range p.Milestones {
+		milestonesByPhaseKey[milestone.PhaseKey] = append(milestonesByPhaseKey[milestone.PhaseKey], db.RoadMapMilestoneInput{
+			Key:                milestone.MilestoneKey,
+			MilestoneName:      milestone.MilestoneName,
+			MilestoneIntent:    milestone.MilestoneIntent,
+			TriggerCondition:   milestone.TriggerCondition,
+			ExpectedState:      milestone.ExpectedState,
+			ObservableEvidence: milestone.ObservableEvidence,
+			CompletionRule:     milestone.CompletionRule,
+			Status:             milestone.Status,
+		})
+	}
+
+	phases := make([]db.RoadMapPhaseInput, 0, len(p.Phases))
+	for _, phase := range p.Phases {
+		phases = append(phases, db.RoadMapPhaseInput{
+			Key:            phase.PhaseKey,
+			PhaseOrder:     phase.PhaseOrder,
+			PhaseName:      phase.PhaseName,
+			PhaseObjective: phase.PhaseObjective,
+			PhaseOutcome:   phase.PhaseOutcome,
+			PhaseScopes:    phase.PhaseScope,
+			ExitCriteria:   phase.ExitCriteria,
+			Status:         phase.Status,
+			Milestones:     milestonesByPhaseKey[phase.PhaseKey],
+		})
+	}
+	return phases
+}
+
+func (p Plan) ToQuestMilestones() []quest.RoadMapMilestone {
+	phaseNames := make(map[string]string, len(p.Phases))
+	for _, phase := range p.Phases {
+		phaseNames[phase.PhaseKey] = phase.PhaseName
+	}
+
+	milestones := make([]quest.RoadMapMilestone, 0, len(p.Milestones))
+	for _, milestone := range p.Milestones {
+		milestones = append(milestones, quest.RoadMapMilestone{
+			MilestoneKey:   milestone.MilestoneKey,
+			PhaseKey:       milestone.PhaseKey,
+			PhaseName:      phaseNames[milestone.PhaseKey],
+			MilestoneName:  milestone.MilestoneName,
+			CompletionRule: milestone.CompletionRule,
+			Status:         milestone.Status,
+		})
+	}
+	return milestones
+}
+
+func normalizePhaseStatus(status string) string {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "IN_PROGRESS":
+		return "IN_PROGRESS"
+	case "COMPLETED":
+		return "COMPLETED"
+	case "FAILED":
+		return "FAILED"
+	default:
+		return "NOT_STARTED"
+	}
+}
+
+func normalizeMilestoneStatus(status string) string {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "IN_PROGRESS":
+		return "IN_PROGRESS"
+	case "ACHIEVED", "COMPLETED":
+		return "ACHIEVED"
+	case "FAILED":
+		return "FAILED"
+	default:
+		return "PENDING"
+	}
+}
+
+func compactStrings(values []string) []string {
+	compacted := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		compacted = append(compacted, value)
+	}
+	return compacted
+}
+
+func requiredText(value string, fallback string, maxRunes int) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = fallback
+	}
+	return truncateRunes(value, maxRunes)
+}
+
+func truncateRunes(value string, maxRunes int) string {
+	if maxRunes <= 0 || utf8.RuneCountInString(value) <= maxRunes {
+		return value
+	}
+
+	runes := []rune(value)
+	return string(runes[:maxRunes])
+}

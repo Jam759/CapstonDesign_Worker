@@ -20,14 +20,19 @@ import (
 	"worker_GoVer/s3"
 )
 
-func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data json.RawMessage) (*StrategyResult, error) {
+func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*StrategyResult, error) {
 	startAt := time.Now()
 
+	dataBytes, err := json.Marshal(base.Data)
+	if err != nil {
+		return nil, apperrors.Newf(apperrors.ErrUnmarshalMessage, 400, false, err, "failed to marshal NormalAnalysis data")
+	}
 	var msg NormalAnalysisQueueMessage
-	if err := json.Unmarshal(data, &msg); err != nil {
+	if err := json.Unmarshal(dataBytes, &msg); err != nil {
 		return nil, apperrors.Newf(apperrors.ErrUnmarshalMessage, 400, false, err, "failed to unmarshal NormalAnalysis message")
 	}
 
+	jobID := base.JobID
 	logger.AnalysisStarted(ctx, jobID,
 		slog.String("analysisType", "NORMAL_ANALYSIS_REQUEST"),
 		slog.String("repo", msg.RepositoryFullName),
@@ -36,9 +41,11 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 	)
 
 	cfg := config.Get()
-	jobIDInt := msg.JobID
-	if jobIDInt == 0 {
-		jobIDInt, _ = strconv.ParseInt(jobID, 10, 64)
+	jobIDInt, _ := strconv.ParseInt(jobID, 10, 64)
+	projectMeta := projectContext.ProjectMetadata{
+		Title:       msg.ProjectTitle,
+		Description: msg.ProjectDescription,
+		Goal:        msg.ProjectGoal,
 	}
 
 	var rb rollbackList
@@ -51,8 +58,8 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 		)
 		rb.Run(ctx)
 		if jobClaimed {
-			if dbErr := db.UpdateAnalysisJobStatus(jobIDInt, "ANALYSIS_JOB_FAILED"); dbErr != nil {
-				logger.Warn(ctx, "rollback: failed to mark job as FAILED", slog.String("reason", dbErr.Error()))
+			if dbErr := db.UpdateAnalysisJobStatus(jobIDInt, "NOTIFICATION_QUEUED"); dbErr != nil {
+				logger.Warn(ctx, "rollback: failed to mark job as NOTIFICATION_QUEUED", slog.String("reason", dbErr.Error()))
 			}
 		}
 		return err
@@ -234,6 +241,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 		baseCommit,
 		msg.AfterCommit,
 		kbVersion,
+		projectMeta,
 	)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrAIAnalysis, 500, true, err, "failed to update project context")
@@ -269,7 +277,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 
 	// 15. Quest 평가 및 생성
 	questStep := logger.StepStart(ctx, "quest.generate", jobID)
-	questReq, err := quest.BuildQuestRequest(ctx, jobIDInt, msg.ProjectID, msg.PushUserID, msg.RepositoryFullName, msg.BranchName)
+	questReq, err := quest.BuildQuestRequest(ctx, jobIDInt, msg.ProjectID, base.UserID, msg.ProjectTitle, msg.ProjectDescription, msg.ProjectGoal, msg.RepositoryFullName, msg.BranchName)
 	if err != nil {
 		questStep.Fail(err)
 		return nil, fail(apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "failed to build quest request"))
@@ -279,7 +287,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 		questStep.Fail(err)
 		return nil, fail(apperrors.Newf(apperrors.ErrAIAnalysis, 500, true, err, "failed to generate quests"))
 	}
-	result.CompleteQuestIDs, result.NewQuestIDs = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, msg.PushUserID, questReq, questResp)
+	result.CompleteQuestIDs, result.NewQuestIDs, _ = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, base.UserID, questReq, questResp)
 	rb.Add(func() {
 		if delErr := db.DeleteQuestEvaluationsByJobID(jobIDInt); delErr != nil {
 			logger.Warn(ctx, "rollback: failed to delete quest evaluations", slog.String("reason", delErr.Error()))
@@ -304,7 +312,10 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 	}
 	uvInput := userView.GenerateInput{
 		ProjectID:          msg.ProjectID,
-		UserID:             msg.PushUserID,
+		UserID:             base.UserID,
+		ProjectTitle:       msg.ProjectTitle,
+		ProjectDescription: msg.ProjectDescription,
+		ProjectGoal:        msg.ProjectGoal,
 		RepositoryFullName: msg.RepositoryFullName,
 		BranchName:         msg.BranchName,
 		BeforeCommitHash:   baseCommit,
@@ -364,4 +375,3 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, jobID string, data j
 	)
 	return result, nil
 }
-

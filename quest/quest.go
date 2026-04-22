@@ -22,7 +22,7 @@ func extractJSONObject(s string) string {
 }
 
 // BuildQuestRequest는 DB에서 기존 퀘스트와 최근 평가 이력을 조회하여 QuestRequest를 조립합니다.
-func BuildQuestRequest(ctx context.Context, jobID int64, projectID int64, userID int64, repositoryFullName string, branchName string) (QuestRequest, error) {
+func BuildQuestRequest(ctx context.Context, jobID int64, projectID int64, userID int64, projectTitle string, projectDescription string, projectGoal string, repositoryFullName string, branchName string) (QuestRequest, error) {
 	_ = ctx
 	// 1. ACTIVE 퀘스트 조회
 	rows, err := db.FetchActiveQuests(projectID, userID)
@@ -74,6 +74,9 @@ func BuildQuestRequest(ctx context.Context, jobID int64, projectID int64, userID
 		Project: Project{
 			ProjectID:          projectID,
 			UserID:             userID,
+			ProjectTitle:       projectTitle,
+			ProjectDescription: projectDescription,
+			ProjectGoal:        projectGoal,
 			RepositoryFullName: repositoryFullName,
 			BranchName:         branchName,
 		},
@@ -123,9 +126,10 @@ func knownQuestIDSet(request QuestRequest) map[int64]struct{} {
 }
 
 // SaveResults는 quest 평가 결과와 신규 퀘스트를 DB에 저장하고, 완료된 퀘스트 ID와 신규 퀘스트 ID를 반환합니다.
-func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64, request QuestRequest, resp *QuestResponse) (completedIDs []int64, newQuestIDs []int64) {
+func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64, request QuestRequest, resp *QuestResponse) (completedIDs []int64, newQuestIDs []int64, milestoneLinks []db.QuestMilestoneLinkInput) {
 	completedIDs = make([]int64, 0)
 	newQuestIDs = make([]int64, 0)
+	milestoneLinks = make([]db.QuestMilestoneLinkInput, 0)
 	knownQuestIDs := knownQuestIDSet(request)
 	savedEvaluationCount := 0
 	skippedEvaluationCount := 0
@@ -170,6 +174,12 @@ func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64
 			logger.Error(ctx, "failed to insert new quest", err, slog.String("title", nq.Title))
 		} else {
 			newQuestIDs = append(newQuestIDs, id)
+			if nq.RelatedMilestoneKey != "" {
+				milestoneLinks = append(milestoneLinks, db.QuestMilestoneLinkInput{
+					UserAiQuestID: id,
+					MilestoneKey:  nq.RelatedMilestoneKey,
+				})
+			}
 		}
 	}
 
@@ -177,6 +187,7 @@ func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64
 		slog.Int("savedEvaluations", savedEvaluationCount),
 		slog.Int("skippedEvaluations", skippedEvaluationCount),
 		slog.Int("newQuests", len(newQuestIDs)),
+		slog.Int("questMilestoneLinks", len(milestoneLinks)),
 	)
 	return
 }

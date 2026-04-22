@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"worker_GoVer/config"
 
@@ -122,6 +123,171 @@ func InsertQuest(
 	return record.UserAiQuestID, nil
 }
 
+func ReplaceProjectRoadMap(projectID int64, phases []RoadMapPhaseInput, questLinks []QuestMilestoneLinkInput) (*RoadMapSaveResult, error) {
+	if len(phases) == 0 {
+		return nil, fmt.Errorf("roadmap must contain at least one phase")
+	}
+
+	result := &RoadMapSaveResult{
+		PhaseIDsByKey:     make(map[string]int64, len(phases)),
+		MilestoneIDsByKey: make(map[string]int64),
+		PhaseIDs:          make([]int64, 0, len(phases)),
+		MilestoneIDs:      make([]int64, 0),
+		LinkedQuestIDs:    make([]int64, 0, len(questLinks)),
+		SkippedQuestLinks: make([]QuestMilestoneLinkInput, 0),
+	}
+
+	err := conn.Transaction(func(tx *gorm.DB) error {
+		if err := deleteProjectRoadMapTx(tx, projectID); err != nil {
+			return err
+		}
+
+		for _, phase := range phases {
+			phaseKey := strings.TrimSpace(phase.Key)
+			if phaseKey == "" {
+				return fmt.Errorf("roadmap phase key is required")
+			}
+
+			phaseRecord := ProjectPhase{
+				ProjectID:      projectID,
+				PhaseOrder:     phase.PhaseOrder,
+				PhaseName:      phase.PhaseName,
+				PhaseObjective: phase.PhaseObjective,
+				PhaseOutcome:   phase.PhaseOutcome,
+				ExitCriteria:   phase.ExitCriteria,
+				Status:         phase.Status,
+			}
+			if err := tx.Create(&phaseRecord).Error; err != nil {
+				return fmt.Errorf("failed to insert roadmap phase key=%s: %w", phaseKey, err)
+			}
+			result.PhaseIDsByKey[phaseKey] = phaseRecord.ProjectPhaseID
+			result.PhaseIDs = append(result.PhaseIDs, phaseRecord.ProjectPhaseID)
+
+			for idx, scope := range phase.PhaseScopes {
+				scope = strings.TrimSpace(scope)
+				if scope == "" {
+					continue
+				}
+				scopeRecord := ProjectPhaseScope{
+					ProjectPhaseID: phaseRecord.ProjectPhaseID,
+					ScopeOrder:     idx,
+					Scope:          scope,
+				}
+				if err := tx.Create(&scopeRecord).Error; err != nil {
+					return fmt.Errorf("failed to insert roadmap phase scope phaseKey=%s: %w", phaseKey, err)
+				}
+			}
+
+			for _, milestone := range phase.Milestones {
+				milestoneKey := strings.TrimSpace(milestone.Key)
+				if milestoneKey == "" {
+					return fmt.Errorf("roadmap milestone key is required phaseKey=%s", phaseKey)
+				}
+
+				milestoneRecord := ProjectMilestone{
+					ProjectID:        projectID,
+					PhaseID:          phaseRecord.ProjectPhaseID,
+					MilestoneName:    milestone.MilestoneName,
+					MilestoneIntent:  milestone.MilestoneIntent,
+					TriggerCondition: milestone.TriggerCondition,
+					ExpectedState:    milestone.ExpectedState,
+					CompletionRule:   milestone.CompletionRule,
+					Status:           milestone.Status,
+				}
+				if err := tx.Create(&milestoneRecord).Error; err != nil {
+					return fmt.Errorf("failed to insert roadmap milestone key=%s: %w", milestoneKey, err)
+				}
+				result.MilestoneIDsByKey[milestoneKey] = milestoneRecord.ProjectMilestoneID
+				result.MilestoneIDs = append(result.MilestoneIDs, milestoneRecord.ProjectMilestoneID)
+
+				for idx, evidence := range milestone.ObservableEvidence {
+					evidence = strings.TrimSpace(evidence)
+					if evidence == "" {
+						continue
+					}
+					evidenceRecord := ProjectMilestoneObservableEvidence{
+						ProjectMilestoneID: milestoneRecord.ProjectMilestoneID,
+						EvidenceOrder:      idx,
+						Evidence:           evidence,
+					}
+					if err := tx.Create(&evidenceRecord).Error; err != nil {
+						return fmt.Errorf("failed to insert roadmap milestone evidence milestoneKey=%s: %w", milestoneKey, err)
+					}
+				}
+			}
+		}
+
+		for _, link := range questLinks {
+			milestoneKey := strings.TrimSpace(link.MilestoneKey)
+			milestoneID, ok := result.MilestoneIDsByKey[milestoneKey]
+			if link.UserAiQuestID <= 0 || milestoneKey == "" || !ok {
+				result.SkippedQuestLinks = append(result.SkippedQuestLinks, link)
+				continue
+			}
+
+			update := tx.Model(&UserAiQuest{}).
+				Where("user_ai_quest_id = ? AND project_id = ?", link.UserAiQuestID, projectID).
+				Update("related_milestone_id", milestoneID)
+			if update.Error != nil {
+				return fmt.Errorf("failed to link quest=%d to milestone=%d: %w", link.UserAiQuestID, milestoneID, update.Error)
+			}
+			if update.RowsAffected == 0 {
+				result.SkippedQuestLinks = append(result.SkippedQuestLinks, link)
+				continue
+			}
+			result.LinkedQuestIDs = append(result.LinkedQuestIDs, link.UserAiQuestID)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to replace roadmap: %w", err)
+	}
+
+	return result, nil
+}
+
+func deleteProjectRoadMapTx(tx *gorm.DB, projectID int64) error {
+	var milestoneIDs []int64
+	if err := tx.Model(&ProjectMilestone{}).
+		Where("project_id = ?", projectID).
+		Pluck("project_milestone_id", &milestoneIDs).Error; err != nil {
+		return fmt.Errorf("failed to query roadmap milestones: %w", err)
+	}
+
+	if len(milestoneIDs) > 0 {
+		if err := tx.Model(&UserAiQuest{}).
+			Where("project_id = ? AND related_milestone_id IN ?", projectID, milestoneIDs).
+			Update("related_milestone_id", gorm.Expr("NULL")).Error; err != nil {
+			return fmt.Errorf("failed to clear quest roadmap links: %w", err)
+		}
+		if err := tx.Delete(&ProjectMilestoneObservableEvidence{}, "project_milestone_id IN ?", milestoneIDs).Error; err != nil {
+			return fmt.Errorf("failed to delete milestone evidence: %w", err)
+		}
+		if err := tx.Delete(&ProjectMilestone{}, "project_milestone_id IN ?", milestoneIDs).Error; err != nil {
+			return fmt.Errorf("failed to delete milestones: %w", err)
+		}
+	}
+
+	var phaseIDs []int64
+	if err := tx.Model(&ProjectPhase{}).
+		Where("project_id = ?", projectID).
+		Pluck("project_phase_id", &phaseIDs).Error; err != nil {
+		return fmt.Errorf("failed to query roadmap phases: %w", err)
+	}
+
+	if len(phaseIDs) > 0 {
+		if err := tx.Delete(&ProjectPhaseScope{}, "project_phase_id IN ?", phaseIDs).Error; err != nil {
+			return fmt.Errorf("failed to delete phase scopes: %w", err)
+		}
+		if err := tx.Delete(&ProjectPhase{}, "project_phase_id IN ?", phaseIDs).Error; err != nil {
+			return fmt.Errorf("failed to delete phases: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func InsertQuestEvaluation(
 	questID int64,
 	analysisJobID int64,
@@ -220,6 +386,39 @@ func GetLatestProjectKBReport(projectID int64) (*ProjectAnalysisReport, error) {
 
 // ClaimAnalysisJob는 job_status가 ANALYSIS_JOB_QUEUED인 경우에만 ANALYSIS_JOB_RUNNING으로 변경합니다.
 // 다른 워커가 이미 선점한 경우 false를 반환합니다.
+func GetAnalysisJobDispatchInput(jobID int64) (*AnalysisJobDispatchInput, error) {
+	var input AnalysisJobDispatchInput
+	err := conn.Table("analysis_jobs AS aj").
+		Select(`
+			aj.analysis_job_id,
+			aj.project_id,
+			aj.user_id,
+			aj.github_app_installation_id,
+			aj.installation_repository_id,
+			aj.before_commit_hash,
+			aj.after_commit_hash,
+			aj.branch,
+			aj.analysis_event_type,
+			aj.is_private_repo,
+			aj.is_merge,
+			COALESCE(p.title, '') AS project_title,
+			COALESCE(p.description, '') AS project_description,
+			COALESCE(p.goal, '') AS project_goal,
+			ir.full_name AS repository_full_name
+		`).
+		Joins("LEFT JOIN projects AS p ON p.project_id = aj.project_id").
+		Joins("LEFT JOIN installation_repository AS ir ON ir.installation_repository_id = aj.installation_repository_id").
+		Where("aj.analysis_job_id = ?", jobID).
+		Take(&input).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get analysis job dispatch input: %w", err)
+	}
+	return &input, nil
+}
+
 func ClaimAnalysisJob(jobID int64) (bool, error) {
 	result := conn.Model(&AnalysisJob{}).
 		Where("analysis_job_id = ? AND job_status = 'ANALYSIS_JOB_QUEUED'", jobID).

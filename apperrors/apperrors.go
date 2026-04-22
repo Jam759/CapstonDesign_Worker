@@ -6,6 +6,7 @@ type ErrorCode string
 
 const (
 	ErrUnmarshalMessage    ErrorCode = "UNMARSHAL_MESSAGE"
+	ErrInvalidJobData      ErrorCode = "INVALID_JOB_DATA"
 	ErrNoProjectKB         ErrorCode = "NO_PROJECT_KB"
 	ErrWorkspaceLocked     ErrorCode = "WORKSPACE_LOCKED"
 	ErrGitOperation        ErrorCode = "GIT_OPERATION_FAILED"

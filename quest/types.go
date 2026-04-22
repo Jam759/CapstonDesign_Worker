@@ -2,29 +2,33 @@ package quest
 
 // QuestRequest는 AI에게 보내는 퀘스트 요청
 type QuestRequest struct {
-	JobID                      int64             `json:"jobId"`
-	Project                    Project           `json:"project"`
-	Quests                     []UserQuest       `json:"quests"`
-	MostRecentQuestEvaluations []QuestEvaluation `json:"mostRecentQuestEvaluations"`
+	JobID                      int64              `json:"jobId"`
+	Project                    Project            `json:"project"`
+	Quests                     []UserQuest        `json:"quests"`
+	MostRecentQuestEvaluations []QuestEvaluation  `json:"mostRecentQuestEvaluations"`
+	RoadMapMilestones          []RoadMapMilestone `json:"roadMapMilestones,omitempty"`
 }
 
 type Project struct {
 	ProjectID          int64  `json:"projectId"`
 	UserID             int64  `json:"userId"`
+	ProjectTitle       string `json:"projectTitle"`
+	ProjectDescription string `json:"projectDescription"`
+	ProjectGoal        string `json:"projectGoal"`
 	RepositoryFullName string `json:"repositoryFullName"`
 	BranchName         string `json:"branchName"`
 }
 
 type UserQuest struct {
-	UserAiQuestID   int64  `json:"userAiQuestId"`
-	Title           string `json:"title"`
-	Description     string `json:"description"`
-	Hint            string `json:"hint"`
+	UserAiQuestID      int64  `json:"userAiQuestId"`
+	Title              string `json:"title"`
+	Description        string `json:"description"`
+	Hint               string `json:"hint"`
 	AIGenerationReason string `json:"aiGenerationReason"`
-	CompletionGuide string `json:"completionGuide"`
-	ApprovalStatus  string `json:"approvalStatus"`
-	ProgressStatus  string `json:"progressStatus"`
-	LastEvaluatedAt string `json:"lastEvaluatedAt"`
+	CompletionGuide    string `json:"completionGuide"`
+	ApprovalStatus     string `json:"approvalStatus"`
+	ProgressStatus     string `json:"progressStatus"`
+	LastEvaluatedAt    string `json:"lastEvaluatedAt"`
 }
 
 type QuestEvaluation struct {
@@ -36,6 +40,15 @@ type QuestEvaluation struct {
 	EvaluatedAt      string  `json:"evaluatedAt,omitempty"`
 }
 
+type RoadMapMilestone struct {
+	MilestoneKey   string `json:"milestoneKey"`
+	PhaseKey       string `json:"phaseKey"`
+	PhaseName      string `json:"phaseName"`
+	MilestoneName  string `json:"milestoneName"`
+	CompletionRule string `json:"completionRule"`
+	Status         string `json:"status"`
+}
+
 // QuestResponse는 AI의 응답
 type QuestResponse struct {
 	QuestEvaluations []QuestEvaluation `json:"questEvaluations"`
@@ -43,11 +56,12 @@ type QuestResponse struct {
 }
 
 type NewQuest struct {
-	Title              string `json:"title"`
-	Description        string `json:"description"`
-	Hint               string `json:"hint"`
-	AIGenerationReason string `json:"aiGenerationReason"`
-	CompletionGuide    string `json:"completionGuide"`
-	RewardExp          int    `json:"rewardExp"`
-	ExpiredAt          string `json:"expiredAt"`
+	Title               string `json:"title"`
+	Description         string `json:"description"`
+	Hint                string `json:"hint"`
+	AIGenerationReason  string `json:"aiGenerationReason"`
+	CompletionGuide     string `json:"completionGuide"`
+	RewardExp           int    `json:"rewardExp"`
+	ExpiredAt           string `json:"expiredAt"`
+	RelatedMilestoneKey string `json:"relatedMilestoneKey,omitempty"`
 }

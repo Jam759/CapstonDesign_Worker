@@ -16,6 +16,9 @@ type UserView struct {
 type Scope struct {
 	ProjectID          int64  `json:"projectId"`
 	UserID             int64  `json:"userId"`
+	ProjectTitle       string `json:"projectTitle"`
+	ProjectDescription string `json:"projectDescription"`
+	ProjectGoal        string `json:"projectGoal"`
 	RepositoryFullName string `json:"repositoryFullName"`
 	BranchName         string `json:"branchName"`
 	BeforeCommitHash   string `json:"beforeCommitHash"`
@@ -60,6 +63,9 @@ type QuestSummary struct {
 type GenerateInput struct {
 	ProjectID          int64
 	UserID             int64
+	ProjectTitle       string
+	ProjectDescription string
+	ProjectGoal        string
 	RepositoryFullName string
 	BranchName         string
 	BeforeCommitHash   string
