@@ -83,7 +83,7 @@ func Get() *Config {
 
 // loadPrivateKey는 환경변수로 깨지기 쉬운 PEM 문자열을 정상 PEM 형식으로 복구합니다.
 func loadPrivateKey() string {
-	raw := strings.TrimSpace(os.Getenv("GITHUB_APP_PRIVATE_KEY"))
+	raw := strings.TrimSpace(os.Getenv("GH_APP_PRIVATE_KEY"))
 	if raw == "" {
 		log.Fatalf("required env missing: GITHUB_APP_PRIVATE_KEY")
 	}
@@ -132,11 +132,11 @@ func LoadConfig() {
 		DBName:                  mustGetEnv("DB_NAME"),
 		OpenAIKey:               mustGetEnv("OPENAI_API_KEY"),
 		DefaultModel:            getEnv("DEFAULT_MODEL", "gpt-4o-mini"),
-		GitHubAppID:             mustGetEnv("GITHUB_APP_ID"),
+		GitHubAppID:             mustGetEnv("GH_APP_ID"),
 		GitHubAppPrivateKey:     loadPrivateKey(),
-		GitHubClientID:          mustGetEnv("GITHUB_CLIENT_ID"),
-		GitHubClientSecret:      mustGetEnv("GITHUB_CLIENT_SECRET"),
-		GitHubAppStateSecret:    mustGetEnv("GITHUB_APP_STATE_SECRET"),
+		GitHubClientID:          mustGetEnv("GH_CLIENT_ID"),
+		GitHubClientSecret:      mustGetEnv("GH_CLIENT_SECRET"),
+		GitHubAppStateSecret:    mustGetEnv("GH_APP_STATE_SECRET"),
 		Debug:                   getEnvAsBool("DEBUG", true),
 		AWSRegion:               mustGetEnv("AWS_REGION"),
 		AWSAccessKeyID:          mustGetEnv("AWS_ACCESS_KEY_ID"),

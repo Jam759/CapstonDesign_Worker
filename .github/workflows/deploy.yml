@@ -1,0 +1,94 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: GOOS=linux GOARCH=amd64 go build -o worker ./main.go
+
+      - name: SCP binary to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: worker
+          target: /tmp/
+
+      - name: Deploy on EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # 바이너리 교체
+            sudo mv /tmp/worker /opt/worker/worker
+            sudo chmod +x /opt/worker/worker
+
+            # .env 파일 생성
+            sudo tee /opt/worker/.env > /dev/null <<EOF
+            DB_HOST=${{ secrets.DB_HOST }}
+            DB_PORT=${{ secrets.DB_PORT }}
+            DB_USER=${{ secrets.DB_USER }}
+            DB_PASS=${{ secrets.DB_PASS }}
+            DB_NAME=${{ secrets.DB_NAME }}
+            OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+            GH_APP_ID=${{ secrets.GH_APP_ID }}
+            GH_APP_PRIVATE_KEY=${{ secrets.GH_APP_PRIVATE_KEY }}
+            GH_CLIENT_ID=${{ secrets.GH_CLIENT_ID }}
+            GH_CLIENT_SECRET=${{ secrets.GH_CLIENT_SECRET }}
+            GH_APP_STATE_SECRET=${{ secrets.GH_APP_STATE_SECRET }}
+            AWS_REGION=${{ secrets.AWS_REGION }}
+            AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}
+            AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}
+            AWS_ANALYSIS_QUEUE_URL=${{ secrets.AWS_ANALYSIS_QUEUE_URL }}
+            AWS_NOTIFICATION_QUEUE_URL=${{ secrets.AWS_NOTIFICATION_QUEUE_URL }}
+            AWS_S3_BUCKET=${{ secrets.AWS_S3_BUCKET }}
+            LOG_DIRECTORY=/var/log/git-worker
+            WORKSPACE_BASE_DIR=/opt/worker/workspace
+            DEBUG=false
+            EOF
+
+            # systemd 서비스 등록 (최초 1회)
+            if [ ! -f /etc/systemd/system/worker.service ]; then
+              sudo tee /etc/systemd/system/worker.service > /dev/null <<EOF
+            [Unit]
+            Description=Git Worker Service
+            After=network.target
+
+            [Service]
+            Type=simple
+            User=worker
+            WorkingDirectory=/opt/worker
+            EnvironmentFile=/opt/worker/.env
+            ExecStart=/opt/worker/worker
+            Restart=always
+            RestartSec=5
+            StandardOutput=journal
+            StandardError=journal
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+              sudo systemctl daemon-reload
+              sudo systemctl enable worker
+            fi
+
+            # 서비스 재시작
+            sudo systemctl restart worker
+            sudo systemctl status worker --no-pager
