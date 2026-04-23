@@ -282,7 +282,7 @@ func UserViewPrompt(projectMetadataJSON string) Prompt {
     },
     "categories": [
       {
-        "key": "architecture|performance_readiness|code_quality|testability|reliability",
+        "key": "ARCHITECTURE|PERFORMANCE_READINESS|CODE_QUALITY|TESTABILITY|RELIABILITY",
         "label": "카테고리 한글 이름",
         "score": 0~100,
         "reason": "점수 근거",
@@ -347,6 +347,7 @@ func QuestPrompt(questRequestJSON string) Prompt {
       "hint": "힌트",
       "aiGenerationReason": "생성 이유",
       "completionGuide": "완료 기준",
+      "category": "ARCHITECTURE|PERFORMANCE_READINESS|CODE_QUALITY|TESTABILITY|RELIABILITY 중 하나",
       "rewardExp": 150,
       "expiredAt": "2026-04-30T23:59:59",
       "relatedMilestoneKey": "milestone-1-2"
@@ -356,6 +357,51 @@ func QuestPrompt(questRequestJSON string) Prompt {
 반드시 위 JSON 형식만 응답하세요.`, questRequestJSON)
 
 	system := "당신은 시니어 소프트웨어 엔지니어이자 코드 품질 멘토입니다. 프로젝트의 코드 분석 결과와 변경 이력을 기반으로 개발자의 성장을 돕는 퀘스트를 평가하고 생성합니다. 평가는 객관적 근거에 기반하며, 새 퀘스트는 실질적으로 프로젝트 품질을 개선할 수 있는 구체적인 과제여야 합니다. 반드시 요청된 JSON 형식으로만 응답하세요."
+
+	return Prompt{User: user, System: system}
+}
+
+// MilestoneEvalPrompt는 현재 커밋 기준으로 PENDING/IN_PROGRESS 마일스톤의 진행 여부를 평가하는 프롬프트를 생성합니다.
+// 첨부 파일: projectContext.json, *.diff
+func MilestoneEvalPrompt(milestoneRequestJSON string) Prompt {
+	milestoneRequestJSON = sanitize(milestoneRequestJSON)
+
+	user := fmt.Sprintf(`첨부된 파일을 분석해주세요:
+- projectContext.json: 프로젝트 전체 분석 문서
+- *.diff (있을 경우): 최근 코드 변경사항
+
+## 마일스톤 평가 요청
+%s
+
+위 마일스톤 목록에 대해 diff와 projectContext를 기반으로 각 마일스톤의 진행 상태를 평가하고 JSON으로 응답해주세요.
+
+### 평가 기준
+- evaluationResult: "PENDING" (변화 없음), "IN_PROGRESS" (부분 진행됨), "ACHIEVED" (완료 조건 충족) 중 하나
+- confidenceScore: 0.0 ~ 1.0 사이의 확신도
+- reason: diff/projectContext에서 근거가 된 코드·파일·변경 내용을 구체적으로 설명
+- progressNote: 다음 평가 시 참고할 진행 메모
+
+### 주의사항
+- 현재 status가 PENDING인 마일스톤은 IN_PROGRESS 또는 ACHIEVED로만 올릴 수 있습니다.
+- 현재 status가 IN_PROGRESS인 마일스톤은 ACHIEVED로만 올릴 수 있습니다.
+- diff에서 직접적인 근거를 찾지 못하면 evaluationResult를 현재 status와 동일하게 유지하세요.
+- 모든 마일스톤에 대해 빠짐없이 응답하세요.
+
+응답 형식:
+{
+  "milestoneEvaluations": [
+    {
+      "projectMilestoneId": 마일스톤ID,
+      "evaluationResult": "IN_PROGRESS",
+      "confidenceScore": 0.75,
+      "reason": "평가 근거",
+      "progressNote": "진행 메모"
+    }
+  ]
+}
+반드시 위 JSON 형식만 응답하세요.`, milestoneRequestJSON)
+
+	system := "당신은 시니어 소프트웨어 엔지니어입니다. git diff와 프로젝트 분석 문서를 기반으로 각 로드맵 마일스톤의 실제 진행 상태를 객관적으로 평가합니다. 직접적인 코드 근거 없이 추측하지 않으며, 반드시 요청된 JSON 형식으로만 응답합니다."
 
 	return Prompt{User: user, System: system}
 }
@@ -370,22 +416,28 @@ func RoadMapPrompt(projectMetadataJSON string) Prompt {
 ## 프로젝트 메타데이터
 %s
 
+## 수량 기준 (절대 하한 — 반드시 준수)
+- phase: 최소 8개, 권장 8~12개
+- milestone: phase당 최소 4개, 권장 4~7개
+- 전체 milestone 합계: 최소 40개
+- 응답 JSON을 출력하기 전에 phases.length와 milestones.length를 직접 세어 위 기준을 충족하는지 확인하세요. 미달이면 추가하고 나서 출력하세요.
+
 ## 생성 원칙
 - 이 로드맵은 /{projectId}/road-map API의 phases, milestones 응답을 만들기 위한 DB 원천 데이터입니다.
 - projectTitle, projectDescription, projectGoal을 우선 참고하여 프로젝트가 달성하려는 목표 중심으로 phase와 milestone을 설계하세요.
 - 현재 리포지토리는 이미 진행 중인 프로젝트일 수 있습니다. 구현된 기능과 코드 증거가 명확한 단계는 COMPLETED/ACHIEVED, 현재 개발 중으로 보이는 단계는 IN_PROGRESS, 미래 작업은 NOT_STARTED/PENDING으로 분류하세요.
-- 보고서체로 요약하지 말고, 팀원이 바로 실행할 수 있는 작업형 로드맵처럼 작성하세요.
-- "고도화", "개선", "안정화", "최적화", "사용자 경험 향상" 같은 포괄 표현만 단독으로 쓰지 말고, 반드시 대상 기능/화면/API/테이블/테스트/운영 절차를 붙여 구체화하세요.
-- 전체를 아주 상세하게 쪼개세요. 기본적으로 8~12개 phase, 각 phase마다 4~7개 milestone을 생성하세요.
-- 프로젝트 규모가 작아 보여도 최소 7개 phase와 최소 32개 milestone은 생성하세요. 단, 같은 의미의 milestone을 이름만 바꿔 중복 생성하지 마세요.
-- 각 phase는 개발 흐름의 큰 묶음이어야 합니다. 예: 도메인 모델 정리, 인증/권한, 핵심 사용자 흐름, 분석 파이프라인, 게이미피케이션, 알림/비동기 처리, 관측성, 테스트/릴리즈.
-- 각 milestone은 하나의 확인 가능한 작업 단위여야 합니다. 화면, API endpoint, DB relation, worker step, SQS contract, rollback path, 테스트 케이스처럼 검증 대상이 분명해야 합니다.
-- 이미 구현된 부분도 "완료됨"으로만 뭉뚱그리지 말고, 구현된 하위 기능을 여러 milestone로 나누어 ACHIEVED/IN_PROGRESS/PENDING 상태를 섞어 표현하세요.
-- phaseName과 milestoneName은 짧고 행동 지향적인 이름으로 쓰세요. 예: "Analysis job dispatch contract", "Quest milestone link migration", "Roadmap query projection".
+- 팀원이 내일 당장 실행할 수 있는 작업형 로드맵으로 작성하세요. 보고서 요약 문장 금지.
+- 추상 표현 금지 예시: "기능 고도화", "성능 개선", "안정화", "사용자 경험 향상", "전반적인 최적화" → 반드시 대상(API 경로, 테이블명, 화면명, 컴포넌트명)을 붙여 구체화하세요.
+  - 나쁜 예: "인증 기능 개선" / 좋은 예: "POST /auth/refresh 토큰 갱신 엔드포인트 구현 및 RTK 저장 로직 연결"
+  - 나쁜 예: "DB 최적화" / 좋은 예: "user_ai_quest 테이블에 (project_id, progress_status) 복합 인덱스 추가"
+- 이미 구현된 부분도 "완료됨" 한 줄로 뭉뚱그리지 마세요. 구현된 하위 기능을 milestone 여러 개로 쪼개어 ACHIEVED/IN_PROGRESS/PENDING 상태를 섞어 표현하세요.
+- phase는 개발 흐름의 큰 묶음이어야 합니다. 예시: 도메인 모델 정의, 인증/권한, 핵심 API, 분석 파이프라인, 게이미피케이션, 알림/비동기, 관측성, 테스트/QA, 배포/운영, 후속 기능.
+- milestone은 하나의 검증 가능한 작업 단위여야 합니다. 화면, API endpoint, DB 스키마, worker 단계, SQS 계약, 롤백 경로, 테스트 케이스처럼 검증 대상이 명확해야 합니다.
+- phaseName과 milestoneName은 짧고 행동 지향적인 이름으로 쓰세요. 예: "Analysis job dispatch contract", "Quest category FK binding", "Roadmap phase count validation".
 - milestoneIntent는 왜 필요한지, triggerCondition은 언제 시작/검증되는지, expectedState는 완료 후 관찰 가능한 결과를 구체적으로 쓰세요.
-- completionRule은 체크리스트처럼 측정 가능해야 합니다. 예: "GET /analysis/{projectId}/road-map 응답에 phase 8개 이상과 milestone 32개 이상이 포함되고, forbidden user는 403을 받는다."
+- completionRule은 체크리스트처럼 측정 가능해야 합니다. 예: "POST /quests 호출 시 category=CODE_QUALITY가 DB에 저장되고, 잘못된 값은 FK 오류로 거부된다."
 - observableEvidence는 코드/DB/API/테스트/로그에서 확인할 수 있는 증거 2~4개를 넣으세요.
-- phaseScope는 프론트에서 그대로 보여도 이해 가능한 구체적인 기능 범위 3~6개를 넣으세요.
+- phaseScope는 프론트에서 그대로 보여도 이해 가능한 구체적인 기능 범위 4~6개를 넣으세요.
 - phaseKey와 milestoneKey는 영문 kebab-case로 고유하게 생성하세요.
 - phase status는 "NOT_STARTED", "IN_PROGRESS", "COMPLETED", "FAILED" 중 하나만 사용하세요.
 - milestone status는 "PENDING", "IN_PROGRESS", "ACHIEVED", "FAILED" 중 하나만 사용하세요.

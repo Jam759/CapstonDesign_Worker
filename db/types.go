@@ -139,6 +139,7 @@ type UserAiQuest struct {
 	CompletedAt        *time.Time `gorm:"column:completed_at"`
 	ApprovalStatus     string     `gorm:"column:approval_status;not null"`
 	ProgressStatus     string     `gorm:"column:progress_status;not null"`
+	Category           string     `gorm:"column:ai_quest_category_cmd"`
 }
 
 func (UserAiQuest) TableName() string { return "user_ai_quest" }
@@ -244,3 +245,28 @@ type RoadMapSaveResult struct {
 	LinkedQuestIDs    []int64
 	SkippedQuestLinks []QuestMilestoneLinkInput
 }
+
+type ActiveMilestone struct {
+	ProjectMilestoneID int64  `gorm:"column:project_milestone_id"`
+	PhaseName          string `gorm:"column:phase_name"`
+	MilestoneName      string `gorm:"column:milestone_name"`
+	MilestoneIntent    string `gorm:"column:milestone_intent"`
+	TriggerCondition   string `gorm:"column:trigger_condition"`
+	ExpectedState      string `gorm:"column:expected_state"`
+	CompletionRule     string `gorm:"column:completion_rule"`
+	Status             string `gorm:"column:status"`
+}
+
+type ProjectMilestoneEvaluation struct {
+	ProjectMilestoneEvaluationID uint      `gorm:"column:project_milestone_evaluation_id;primaryKey;autoIncrement"`
+	ProjectMilestoneID           int64     `gorm:"column:project_milestone_id;not null"`
+	AnalysisJobID                *int64    `gorm:"column:analysis_job_id"`
+	EvaluationResult             string    `gorm:"column:evaluation_result;not null"`
+	ConfidenceScore              float64   `gorm:"column:confidence_score"`
+	Reason                       string    `gorm:"column:reason"`
+	ProgressNote                 string    `gorm:"column:progress_note"`
+	CreatedAt                    time.Time `gorm:"column:created_at;autoCreateTime"`
+	EvaluatedAt                  time.Time `gorm:"column:evaluated_at;not null"`
+}
+
+func (ProjectMilestoneEvaluation) TableName() string { return "project_milestone_evaluation" }

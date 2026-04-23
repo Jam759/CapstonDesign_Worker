@@ -10,6 +10,7 @@ import (
 	"worker_GoVer/apperrors"
 	"worker_GoVer/artifact/codeGraph"
 	"worker_GoVer/artifact/projectContext"
+	"worker_GoVer/artifact/roadmap"
 	"worker_GoVer/artifact/userView"
 	"worker_GoVer/config"
 	"worker_GoVer/db"
@@ -304,7 +305,39 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 		slog.Int("newQuestCount", len(result.NewQuestIDs)),
 	)
 
-	// 16. UserView 생성
+	// 16. 마일스톤 진행 평가
+	milestoneEvalStep := logger.StepStart(ctx, "roadmap.milestone_eval", jobID)
+	milestoneReq, err := roadmap.BuildMilestoneEvalRequest(ctx, jobIDInt, msg.ProjectID, msg.ProjectTitle, msg.ProjectDescription, msg.ProjectGoal)
+	if err != nil {
+		milestoneEvalStep.Fail(err)
+		logger.Warn(ctx, "failed to build milestone eval request", slog.String("reason", err.Error()))
+	} else if milestoneReq == nil {
+		milestoneEvalStep.Complete(slog.String("status", "no_active_milestones"))
+	} else {
+		milestoneResp, err := roadmap.EvaluateMilestones(ctx, milestoneReq, ctxPath, diffPath)
+		if err != nil {
+			milestoneEvalStep.Fail(err)
+			logger.Warn(ctx, "milestone evaluation failed", slog.String("reason", err.Error()))
+		} else {
+			changedIDs, prevStatuses := roadmap.SaveMilestoneEvalResults(ctx, jobIDInt, milestoneReq, milestoneResp)
+			milestoneEvalStep.Complete(
+				slog.Int("evaluated", len(milestoneResp.MilestoneEvaluations)),
+				slog.Int("statusUpdates", len(changedIDs)),
+			)
+			if len(changedIDs) > 0 {
+				rb.Add(func() {
+					if delErr := db.DeleteMilestoneEvaluationsByJobID(jobIDInt); delErr != nil {
+						logger.Warn(ctx, "rollback: failed to delete milestone evaluations", slog.String("reason", delErr.Error()))
+					}
+					if revertErr := db.RevertMilestoneStatuses(prevStatuses); revertErr != nil {
+						logger.Warn(ctx, "rollback: failed to revert milestone statuses", slog.String("reason", revertErr.Error()))
+					}
+				})
+			}
+		}
+	}
+
+	// 17. UserView 생성
 	uvVersion, err := db.NextReportVersion(msg.ProjectID, "USER_VIEW")
 	if err != nil {
 		logger.Warn(ctx, "failed to get user view version, defaulting to 1", slog.String("reason", err.Error()))
@@ -351,7 +384,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 		}
 	})
 
-	// 17. touch 파일 업데이트
+	// 18. touch 파일 업데이트
 	touchStep := logger.StepStart(ctx, "workspace.touch", jobID)
 	if _, err := disk.CreateTouchFileAtomic(ctx, localPath); err != nil {
 		touchStep.Fail(err)
@@ -360,7 +393,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 		touchStep.Complete()
 	}
 
-	// 18. 작업 완료
+	// 19. 작업 완료
 	statusStep := logger.StepStart(ctx, "job.complete", jobID)
 	if err := db.UpdateAnalysisJobStatus(jobIDInt, "ANALYSIS_JOB_COMPLETED"); err != nil {
 		statusStep.Fail(err)

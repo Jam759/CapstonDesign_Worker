@@ -169,7 +169,7 @@ func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64
 	}
 
 	for _, nq := range resp.NewQuests {
-		id, err := db.InsertQuest(projectID, userID, nq.Title, nq.Description, nq.Hint, nq.AIGenerationReason, nq.CompletionGuide, nq.RewardExp, nq.ExpiredAt)
+		id, err := db.InsertQuest(projectID, userID, nq.Title, nq.Description, nq.Hint, nq.AIGenerationReason, nq.CompletionGuide, nq.Category, nq.RewardExp, nq.ExpiredAt)
 		if err != nil {
 			logger.Error(ctx, "failed to insert new quest", err, slog.String("title", nq.Title))
 		} else {

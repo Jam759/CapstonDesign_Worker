@@ -61,6 +61,7 @@ type NewQuest struct {
 	Hint                string `json:"hint"`
 	AIGenerationReason  string `json:"aiGenerationReason"`
 	CompletionGuide     string `json:"completionGuide"`
+	Category            string `json:"category"`
 	RewardExp           int    `json:"rewardExp"`
 	ExpiredAt           string `json:"expiredAt"`
 	RelatedMilestoneKey string `json:"relatedMilestoneKey,omitempty"`

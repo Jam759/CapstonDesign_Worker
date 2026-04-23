@@ -97,6 +97,7 @@ func InsertQuest(
 	hint string,
 	aiGenerationReason string,
 	completionGuide string,
+	category string,
 	rewardExp int,
 	expiredAt string,
 ) (int64, error) {
@@ -112,6 +113,7 @@ func InsertQuest(
 		Hint:               hint,
 		AIGenerationReason: aiGenerationReason,
 		CompletionGuide:    completionGuide,
+		Category:           category,
 		RewardExp:          int16(rewardExp),
 		ExpiredAt:          t,
 		ApprovalStatus:     "REQUEST_PENDING",
@@ -476,6 +478,73 @@ func RevertQuestCompletion(questIDs []int64) error {
 		}).Error
 	if err != nil {
 		return fmt.Errorf("failed to revert quest completion ids=%v: %w", questIDs, err)
+	}
+	return nil
+}
+
+// FetchActiveMilestones는 projectID 기준 PENDING/IN_PROGRESS 마일스톤을 phase 정보와 함께 조회합니다.
+func FetchActiveMilestones(projectID int64) ([]ActiveMilestone, error) {
+	var milestones []ActiveMilestone
+	err := conn.Table("project_milestone AS pm").
+		Select(`pm.project_milestone_id, pp.phase_name, pm.milestone_name,
+			pm.milestone_intent, pm.trigger_condition, pm.expected_state,
+			pm.completion_rule, pm.status`).
+		Joins("JOIN project_phase AS pp ON pp.project_phase_id = pm.phase_id").
+		Where("pm.project_id = ? AND pm.status IN ('PENDING', 'IN_PROGRESS')", projectID).
+		Scan(&milestones).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch active milestones: %w", err)
+	}
+	return milestones, nil
+}
+
+// InsertMilestoneEvaluation는 마일스톤 평가 결과를 저장합니다.
+func InsertMilestoneEvaluation(milestoneID int64, jobID int64, evaluationResult string, confidenceScore float64, reason string, progressNote string) error {
+	now := time.Now()
+	record := ProjectMilestoneEvaluation{
+		ProjectMilestoneID: milestoneID,
+		AnalysisJobID:      &jobID,
+		EvaluationResult:   evaluationResult,
+		ConfidenceScore:    confidenceScore,
+		Reason:             reason,
+		ProgressNote:       progressNote,
+		EvaluatedAt:        now,
+	}
+	if err := conn.Create(&record).Error; err != nil {
+		return fmt.Errorf("failed to insert milestone evaluation: %w", err)
+	}
+	return nil
+}
+
+// UpdateMilestoneStatus는 마일스톤의 status를 업데이트합니다.
+func UpdateMilestoneStatus(milestoneID int64, status string) error {
+	err := conn.Model(&ProjectMilestone{}).
+		Where("project_milestone_id = ?", milestoneID).
+		Update("status", status).Error
+	if err != nil {
+		return fmt.Errorf("failed to update milestone status id=%d: %w", milestoneID, err)
+	}
+	return nil
+}
+
+// DeleteMilestoneEvaluationsByJobID는 jobID에 해당하는 마일스톤 평가 기록을 삭제합니다. (롤백용)
+func DeleteMilestoneEvaluationsByJobID(jobID int64) error {
+	err := conn.Delete(&ProjectMilestoneEvaluation{}, "analysis_job_id = ?", jobID).Error
+	if err != nil {
+		return fmt.Errorf("failed to delete milestone evaluations jobId=%d: %w", jobID, err)
+	}
+	return nil
+}
+
+// RevertMilestoneStatuses는 변경된 마일스톤 status를 이전 값으로 되돌립니다. (롤백용)
+func RevertMilestoneStatuses(prevStatuses map[int64]string) error {
+	for milestoneID, status := range prevStatuses {
+		err := conn.Model(&ProjectMilestone{}).
+			Where("project_milestone_id = ?", milestoneID).
+			Update("status", status).Error
+		if err != nil {
+			return fmt.Errorf("failed to revert milestone status id=%d: %w", milestoneID, err)
+		}
 	}
 	return nil
 }
