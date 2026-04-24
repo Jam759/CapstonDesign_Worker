@@ -333,13 +333,14 @@ func QuestPrompt(questRequestJSON string) Prompt {
 {
   "questEvaluations": [
     {
-      "userAiQuestId": 퀘스트ID,
+      "userAiQuestId": 123,
       "evaluationResult": "IN_PROGRESS",
       "confidenceScore": 0.85,
       "reason": "평가 근거",
       "progressNote": "진행 메모"
     }
   ],
+- userAiQuestId는 요청의 quests[].userAiQuestId 값을 따옴표 없이 정수 그대로 반환할 것.
   "newQuests": [
     {
       "title": "퀘스트 제목",
