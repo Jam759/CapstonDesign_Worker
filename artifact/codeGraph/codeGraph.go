@@ -13,6 +13,8 @@ import (
 	"worker_GoVer/logger"
 )
 
+var log = logger.WithComponent("codeGraph")
+
 // 등록된 전략 목록
 var strategies = []strategy.CodeGraphStrategy{
 	strategy.GoStrategy{},
@@ -23,7 +25,7 @@ var strategies = []strategy.CodeGraphStrategy{
 // GenerateCodeGraph는 프로젝트의 코드 그래프를 생성하고 artifact에 저장합니다.
 // 반환값: 저장된 JSON 파일 경로
 func GenerateCodeGraph(ctx context.Context, projectPath string) (string, error) {
-	logger.Info(ctx, "codeGraph analysis start", slog.String("projectPath", projectPath))
+	log.Trace(ctx, "codeGraph analysis start", slog.String("projectPath", projectPath))
 
 	// 1. 프로젝트에 존재하는 파일 확장자 수집
 	extSet := map[string]bool{}
@@ -56,7 +58,7 @@ func GenerateCodeGraph(ctx context.Context, projectPath string) (string, error) 
 			continue
 		}
 
-		graph, err := s.Analyze(projectPath)
+		graph, err := s.Analyze(ctx, projectPath)
 		if err != nil {
 			return "", fmt.Errorf("failed to analyze with %T: %w", s, err)
 		}
@@ -75,11 +77,11 @@ func GenerateCodeGraph(ctx context.Context, projectPath string) (string, error) 
 		for e := range extSet {
 			exts = append(exts, e)
 		}
-		logger.Warn(ctx, "no supported language detected", slog.Any("extensions", exts))
+		log.Warn(ctx, "no supported language detected", nil, slog.Any("extensions", exts))
 		return "", fmt.Errorf("no supported language found in project")
 	}
 
-	logger.Info(ctx, "codeGraph merged",
+	log.Trace(ctx, "codeGraph merged",
 		slog.String("language", merged.Language),
 		slog.Int("nodes", len(merged.Nodes)),
 		slog.Int("edges", len(merged.Edges)),
@@ -109,6 +111,6 @@ func GenerateCodeGraph(ctx context.Context, projectPath string) (string, error) 
 		return "", fmt.Errorf("failed to write code graph: %w", err)
 	}
 
-	logger.Info(ctx, "codeGraph saved", slog.String("path", savePath))
+	log.Trace(ctx, "codeGraph saved", slog.String("path", savePath))
 	return savePath, nil
 }

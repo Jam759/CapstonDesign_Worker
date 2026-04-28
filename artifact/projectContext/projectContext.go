@@ -19,10 +19,12 @@ import (
 	"worker_GoVer/s3"
 )
 
+var log = logger.WithComponent("projectContext")
+
 // GenerateProjectContext는 codeGraph + codeContent 기반으로 프로젝트 분석 문서를 생성합니다.
 // 흐름: metrics 계산 → signals 정적 분석 → 모듈별 AI 분석(병렬) → 전체 AI 분석 + signals 보정 → 저장
 func GenerateProjectContext(ctx context.Context, projectPath string, graphPath string, contentPath string, version int, project ProjectMetadata) (string, error) {
-	logger.Info(ctx, "projectContext generation start", slog.Int("version", version))
+	log.Trace(ctx, "projectContext generation start", slog.Int("version", version))
 
 	// 파일 읽기
 	graphData, err := os.ReadFile(graphPath)
@@ -40,7 +42,7 @@ func GenerateProjectContext(ctx context.Context, projectPath string, graphPath s
 	}
 
 	// 1. 정량 메트릭 계산 (codeGraph 기반, AI 불필요)
-	logger.Info(ctx, "graph loaded",
+	log.Trace(ctx, "graph loaded",
 		slog.String("language", graph.Language),
 		slog.Int("nodes", len(graph.Nodes)),
 		slog.Int("edges", len(graph.Edges)),
@@ -68,7 +70,7 @@ func GenerateProjectContext(ctx context.Context, projectPath string, graphPath s
 	}
 
 	chunks := chunkModulesByNodeCount(moduleNames, moduleNodes, 5)
-	logger.Info(ctx, "starting chunk AI analysis",
+	log.Trace(ctx, "starting chunk AI analysis",
 		slog.Int("modules", len(moduleNames)),
 		slog.Int("chunks", len(chunks)),
 	)
@@ -98,10 +100,10 @@ func GenerateProjectContext(ctx context.Context, projectPath string, graphPath s
 		details = append(details, r.details...)
 	}
 
-	logger.Info(ctx, "module analysis done", slog.Int("modules", len(details)))
+	log.Trace(ctx, "module analysis done", slog.Int("modules", len(details)))
 
 	// 5. 전체 프로젝트 분석 + signals AI 보정 (파일 전달)
-	logger.Info(ctx, "generating overview")
+	log.Trace(ctx, "generating overview")
 	analysis, correctedSignals, err := generateOverview(ctx, details, &graph, metrics, signals, graphPath, contentPath, project)
 	if err != nil {
 		return "", fmt.Errorf("failed to generate overview: %w", err)
@@ -142,7 +144,7 @@ func UpdateProjectContext(
 	version int,
 	project ProjectMetadata,
 ) (string, error) {
-	logger.Info(ctx, "projectContext incremental update start",
+	log.Trace(ctx, "projectContext incremental update start",
 		slog.Int("version", version),
 		slog.Int("changedFiles", len(changedFilePaths)),
 	)
@@ -171,7 +173,7 @@ func UpdateProjectContext(
 
 	// diff가 없으면 CodeGraph만 교체하고 baseline 분석 유지
 	if len(changedFilePaths) == 0 {
-		logger.Info(ctx, "no changed files, reusing baseline analysis")
+		log.Trace(ctx, "no changed files, reusing baseline analysis")
 		baseline.Project = project
 		baseline.CodeGraph = &graph
 		baseline.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
@@ -201,9 +203,7 @@ func UpdateProjectContext(
 
 	var updated ProjectContext
 	if err := json.Unmarshal([]byte(responseStr), &updated); err != nil {
-		logger.Warn(ctx, "failed to parse incremental response, falling back to baseline",
-			slog.String("reason", err.Error()),
-		)
+		log.Warn(ctx, "failed to parse incremental response, falling back to baseline", err)
 		baseline.Project = project
 		baseline.CodeGraph = &graph
 		baseline.GeneratedAt = time.Now().In(seoul).Format(time.RFC3339)
@@ -273,7 +273,7 @@ func saveProjectContext(ctx context.Context, localPath string, pctx ProjectConte
 		return "", fmt.Errorf("failed to write project context: %w", err)
 	}
 
-	logger.Info(ctx, "projectContext saved", slog.String("path", savePath))
+	log.Trace(ctx, "projectContext saved", slog.String("path", savePath))
 	return savePath, nil
 }
 
@@ -415,6 +415,13 @@ func generateOverview(ctx context.Context, details []ModuleDetail, graph *strate
 	if !ok {
 		return &Analysis{Overview: responseStr}, nil, nil
 	}
+
+	// LLM이 전체 응답 구조를 overview 필드 안에 넣는 경우 감지 후 언래핑
+	if unwrapped := tryUnwrapNestedResponse(analysisMap); unwrapped != nil {
+		rawParsed = unwrapped
+		analysisMap = rawParsed["analysis"].(map[string]any)
+	}
+
 	analysis := mapToAnalysis(analysisMap)
 
 	var correctedSignals *Signals
@@ -506,6 +513,29 @@ func mapToAnalysis(m map[string]any) Analysis {
 	return a
 }
 
+// tryUnwrapNestedResponse는 LLM이 전체 응답 구조를 overview 필드 안에 넣었을 때 이를 감지하고 언래핑합니다.
+// overview가 "analysis" 키를 포함하는 JSON 객체(또는 JSON 문자열)인 경우 해당 맵을 반환합니다.
+func tryUnwrapNestedResponse(analysisMap map[string]any) map[string]any {
+	overviewRaw := analysisMap["overview"]
+
+	var overviewMap map[string]any
+	switch v := overviewRaw.(type) {
+	case map[string]any:
+		overviewMap = v
+	case string:
+		if err := json.Unmarshal([]byte(strings.TrimSpace(v)), &overviewMap); err != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+
+	if _, hasAnalysis := overviewMap["analysis"]; hasAnalysis {
+		return overviewMap
+	}
+	return nil
+}
+
 // writeTempJSON은 v를 JSON으로 직렬화하여 임시 파일에 저장하고 경로를 반환합니다.
 func writeTempJSON(pattern string, v any) (string, error) {
 	data, err := json.Marshal(v)
@@ -564,7 +594,7 @@ func Persist(ctx context.Context, filePath string, prevKBID *int64, installation
 	if err != nil {
 		return 0, url, fmt.Errorf("projectContext DB insert failed: %w", err)
 	}
-	logger.Info(ctx, "PROJECT_KB saved",
+	log.Trace(ctx, "PROJECT_KB saved",
 		slog.Int("version", version),
 		slog.String("url", url),
 	)

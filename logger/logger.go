@@ -16,6 +16,8 @@ type Config struct {
 	ServerType string // serverType 필드값 (예: go)
 }
 
+const LevelTrace = slog.Level(-8)
+
 var (
 	global *slog.Logger
 	cfg    Config
@@ -29,7 +31,7 @@ func Init(c Config) error {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	logFile, err := newRotatingFileWriter(c.Directory, "structured-http.log")
+	logFile, err := newRotatingFileWriter(c.Directory, "structured-app.log")
 	if err != nil {
 		return err
 	}
@@ -61,7 +63,8 @@ func Init(c Config) error {
 
 	var handler slog.Handler
 	if c.Debug {
-		textH := newTextHandler(os.Stdout, slog.LevelDebug)
+		jsonOpts.Level = LevelTrace
+		textH := newTextHandler(os.Stdout, LevelTrace)
 		handler = newMultiHandler(jsonHandler, textH)
 	} else {
 		handler = jsonHandler
@@ -87,6 +90,10 @@ func replaceAttr(groups []string, a slog.Attr) slog.Attr {
 		}
 	case slog.MessageKey:
 		return slog.Attr{Key: "message", Value: a.Value}
+	case slog.LevelKey:
+		if level, ok := a.Value.Any().(slog.Level); ok && level == LevelTrace {
+			return slog.String("level", "TRACE")
+		}
 	}
 	return a
 }

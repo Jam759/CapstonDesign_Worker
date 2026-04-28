@@ -22,6 +22,8 @@ import (
 	awssqs "github.com/aws/aws-sdk-go-v2/service/sqs"
 )
 
+var log = logger.WithComponent("sqs")
+
 var strategyMap = map[MessageType]strategy.SqsStrategy{
 	FullScanAnalysis: strategy.FullScanStrategy{},
 	NormalAnalysis:   strategy.NormalAnalysisStrategy{},
@@ -52,14 +54,14 @@ func NewConsumer() (*Consumer, error) {
 }
 
 func (c *Consumer) StartAnalysisListener(ctx context.Context) {
-	logger.WorkerEvent(ctx, logger.EventWorkerStarted, "analysis queue listener started")
+	log.WorkerEvent(ctx, logger.EventWorkerStarted, "analysis queue listener started")
 
 	for {
 		select {
 		case <-ctx.Done():
-			logger.WorkerEvent(ctx, logger.EventWorkerStopping, "analysis queue listener stopping")
+			log.WorkerEvent(ctx, logger.EventWorkerStopping, "analysis queue listener stopping")
 			c.wg.Wait()
-			logger.WorkerEvent(ctx, logger.EventWorkerStopped, "analysis queue listener stopped")
+			log.WorkerEvent(ctx, logger.EventWorkerStopped, "analysis queue listener stopped")
 			return
 		default:
 		}
@@ -71,7 +73,7 @@ func (c *Consumer) StartAnalysisListener(ctx context.Context) {
 		})
 		if err != nil {
 			metrics.RecordSQSPollError()
-			logger.Error(ctx, "SQS receive error", err, slog.String("category", logger.CategorySQS))
+			log.Error(ctx, "SQS receive error", err)
 			continue
 		}
 
@@ -97,7 +99,7 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 
 	var incoming AnalysisQueueMessage
 	if err := json.Unmarshal([]byte(*body), &incoming); err != nil {
-		logger.Error(ctx, "failed to unmarshal analysis queue message", err, slog.String("category", logger.CategorySQS))
+		log.Error(ctx, "failed to unmarshal analysis queue message", err)
 		c.discardAnalysisMessage(ctx, receiptHandle, "discarding malformed analysis queue message")
 		return
 	}
@@ -105,7 +107,7 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 	msgCtx := logger.WithTraceID(ctx, incoming.TraceID)
 	incomingJobID := strings.TrimSpace(incoming.JobID)
 	if incomingJobID == "" {
-		logger.Warn(msgCtx, "analysis queue message missing jobId")
+		log.Warn(msgCtx, "analysis queue message missing jobId", nil)
 		c.discardAnalysisMessage(msgCtx, receiptHandle, "discarding analysis queue message without jobId")
 		return
 	}
@@ -113,29 +115,27 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 
 	jobIDInt, err := strconv.ParseInt(incomingJobID, 10, 64)
 	if err != nil {
-		logger.Warn(msgCtx, "invalid job id in analysis queue message", slog.String("reason", err.Error()))
+		log.Warn(msgCtx, "invalid job id in analysis queue message", err)
 		c.discardAnalysisMessage(msgCtx, receiptHandle, "discarding analysis queue message with invalid jobId")
 		return
 	}
 
 	jobInput, err := db.GetAnalysisJobDispatchInput(jobIDInt)
 	if err != nil {
-		logger.Error(msgCtx, "failed to load analysis job", err, slog.String("category", logger.CategoryAnalysis))
+		log.Error(msgCtx, "failed to load analysis job", err)
 		return
 	}
 	if jobInput == nil {
-		logger.Warn(msgCtx, "analysis job not found for queue message", slog.Int64("jobId", jobIDInt))
+		log.Warn(msgCtx, "analysis job not found for queue message", nil, slog.Int64("jobId", jobIDInt))
 		c.discardAnalysisMessage(msgCtx, receiptHandle, "discarding analysis queue message for missing job")
 		return
 	}
 
 	base, err := buildStrategyMessage(jobInput, logger.TraceIDFromContext(msgCtx))
 	if err != nil {
-		logger.Error(msgCtx, "invalid analysis job input", err, slog.String("category", logger.CategorySQS))
+		log.Error(msgCtx, "invalid analysis job input", err)
 		if delErr := c.deleteMessage(msgCtx, c.cfg.AWSAnalysisQueueURL, receiptHandle); delErr != nil {
-			logger.Warn(msgCtx, "failed to delete invalid SQS message",
-				slog.String("reason", delErr.Error()),
-			)
+			log.Warn(msgCtx, "failed to delete invalid SQS message", delErr)
 		}
 
 		var analysisErr *apperrors.AnalysisError
@@ -143,7 +143,7 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 			analysisErr = apperrors.Newf(apperrors.ErrInvalidJobData, 422, false, err, "invalid analysis job input")
 		}
 		if err := c.publishFailNotification(msgCtx, jobIDInt, base, analysisErr); err != nil {
-			logger.Error(msgCtx, "failed to publish failure notification", err)
+			log.Error(msgCtx, "failed to publish failure notification", err)
 			c.updateAnalysisJobStatus(msgCtx, jobIDInt, "FAILED")
 		}
 		return
@@ -153,7 +153,7 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 	msgCtx = logger.WithJobID(msgCtx, base.JobID)
 	startAt := time.Now()
 
-	logger.SQSReceived(msgCtx, base.JobID, base.Type)
+	log.SQSReceived(msgCtx, base.JobID, base.Type)
 
 	s := GetStrategy(MessageType(base.Type))
 	if s == nil {
@@ -166,14 +166,12 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 			base.JobID,
 			base.Type,
 		)
-		logger.Warn(msgCtx, "unknown analysis event type", slog.String("messageType", base.Type))
+		log.Warn(msgCtx, "unknown analysis event type", nil, slog.String("messageType", base.Type))
 		if delErr := c.deleteMessage(msgCtx, c.cfg.AWSAnalysisQueueURL, receiptHandle); delErr != nil {
-			logger.Warn(msgCtx, "failed to delete SQS message with unknown type",
-				slog.String("reason", delErr.Error()),
-			)
+			log.Warn(msgCtx, "failed to delete SQS message with unknown type", delErr)
 		}
 		if err := c.publishFailNotification(msgCtx, jobIDInt, base, analysisErr); err != nil {
-			logger.Error(msgCtx, "failed to publish failure notification", err)
+			log.Error(msgCtx, "failed to publish failure notification", err)
 			c.updateAnalysisJobStatus(msgCtx, jobIDInt, "FAILED")
 		}
 		return
@@ -188,9 +186,7 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 			select {
 			case <-ticker.C:
 				if err := c.resetMessageVisibility(msgCtx, c.cfg.AWSAnalysisQueueURL, receiptHandle); err != nil {
-					logger.Warn(msgCtx, "failed to extend SQS visibility timeout",
-						slog.String("reason", err.Error()),
-					)
+					log.Warn(msgCtx, "failed to extend SQS visibility timeout", err)
 				}
 			case <-heartbeatCtx.Done():
 				return
@@ -201,7 +197,7 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 	result, err := s.Handle(msgCtx, base)
 	if err != nil {
 		durationMs := time.Since(startAt).Milliseconds()
-		logger.SQSFailed(msgCtx, base.JobID, base.Type, err, durationMs)
+		log.SQSFailed(msgCtx, base.JobID, base.Type, err, durationMs)
 
 		var analysisErr *apperrors.AnalysisError
 		if !errors.As(err, &analysisErr) {
@@ -209,21 +205,17 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 		}
 
 		if delErr := c.deleteMessage(msgCtx, c.cfg.AWSAnalysisQueueURL, receiptHandle); delErr != nil {
-			logger.Warn(msgCtx, "failed to delete SQS message after failure",
-				slog.String("reason", delErr.Error()),
-			)
+			log.Warn(msgCtx, "failed to delete SQS message after failure", delErr)
 		}
 		if err := c.publishFailNotification(msgCtx, jobIDInt, base, analysisErr); err != nil {
-			logger.Error(msgCtx, "failed to publish failure notification", err)
+			log.Error(msgCtx, "failed to publish failure notification", err)
 			c.updateAnalysisJobStatus(msgCtx, jobIDInt, "FAILED")
 		}
 		return
 	}
 
 	if err := c.deleteMessage(msgCtx, c.cfg.AWSAnalysisQueueURL, receiptHandle); err != nil {
-		logger.Warn(msgCtx, "failed to delete SQS message after success",
-			slog.String("reason", err.Error()),
-		)
+		log.Warn(msgCtx, "failed to delete SQS message after success", err)
 	}
 
 	if result != nil {
@@ -242,11 +234,11 @@ func (c *Consumer) handleAnalysisMessage(ctx context.Context, body *string, rece
 			Data:      successData,
 		}
 		if err := c.PublishNotification(msgCtx, notification); err != nil {
-			logger.Error(msgCtx, "failed to publish success notification", err)
+			log.Error(msgCtx, "failed to publish success notification", err)
 		}
 	}
 
-	logger.SQSProcessed(msgCtx, base.JobID, base.Type, time.Since(startAt).Milliseconds())
+	log.SQSProcessed(msgCtx, base.JobID, base.Type, time.Since(startAt).Milliseconds())
 }
 
 func buildStrategyMessage(job *db.AnalysisJobDispatchInput, traceID string) (strategy.SqsBaseMessage, error) {
@@ -382,10 +374,9 @@ func (c *Consumer) publishFailNotification(ctx context.Context, jobID int64, bas
 
 func (c *Consumer) updateAnalysisJobStatus(ctx context.Context, jobID int64, status string) {
 	if err := db.UpdateAnalysisJobStatus(jobID, status); err != nil {
-		logger.Warn(ctx, "failed to update analysis job status",
+		log.Warn(ctx, "failed to update analysis job status", err,
 			slog.Int64("jobID", jobID),
 			slog.String("status", status),
-			slog.String("reason", err.Error()),
 		)
 	}
 }
@@ -407,7 +398,7 @@ func (c *Consumer) PublishNotification(ctx context.Context, msg NotificationQueu
 
 	metrics.RecordNotificationPublished(string(msg.EventType), "published")
 
-	logger.Info(ctx, "SQS notification published",
+	log.Info(ctx, "SQS notification published",
 		slog.Int64("jobId", msg.JobID),
 		slog.String("status", string(msg.Status)),
 		slog.String("eventType", string(msg.EventType)),
@@ -417,12 +408,10 @@ func (c *Consumer) PublishNotification(ctx context.Context, msg NotificationQueu
 
 func (c *Consumer) discardAnalysisMessage(ctx context.Context, receiptHandle *string, reason string) {
 	if err := c.deleteMessage(ctx, c.cfg.AWSAnalysisQueueURL, receiptHandle); err != nil {
-		logger.Warn(ctx, "failed to discard invalid analysis queue message",
-			slog.String("reason", err.Error()),
-		)
+		log.Warn(ctx, "failed to discard invalid analysis queue message", err)
 		return
 	}
-	logger.Warn(ctx, reason)
+	log.Warn(ctx, reason, nil)
 }
 
 func (c *Consumer) deleteMessage(ctx context.Context, queueURL string, receiptHandle *string) error {

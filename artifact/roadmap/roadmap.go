@@ -12,6 +12,8 @@ import (
 	"worker_GoVer/logger"
 )
 
+var log = logger.WithComponent("roadmap")
+
 func Generate(ctx context.Context, input GenerateInput, projectContextPath string) (*Plan, error) {
 	metadata, err := json.Marshal(input)
 	if err != nil {
@@ -19,7 +21,7 @@ func Generate(ctx context.Context, input GenerateInput, projectContextPath strin
 	}
 
 	p := ai.RoadMapPrompt(string(metadata))
-	logger.Info(ctx, "roadmap generation start",
+	log.Trace(ctx, "roadmap generation start",
 		slog.Int64("projectId", input.ProjectID),
 		slog.String("repo", input.RepositoryFullName),
 	)
@@ -42,7 +44,7 @@ func Generate(ctx context.Context, input GenerateInput, projectContextPath strin
 		return nil, err
 	}
 
-	logger.Info(ctx, "roadmap generation completed",
+	log.Trace(ctx, "roadmap generation completed",
 		slog.Int("phaseCount", len(plan.Phases)),
 		slog.Int("milestoneCount", len(plan.Milestones)),
 	)
@@ -62,7 +64,7 @@ func Persist(ctx context.Context, projectID int64, plan *Plan, questLinks []db.Q
 		return nil, err
 	}
 
-	logger.Info(ctx, "roadmap saved",
+	log.Trace(ctx, "roadmap saved",
 		slog.Int64("projectId", projectID),
 		slog.Int("phaseCount", len(result.PhaseIDs)),
 		slog.Int("milestoneCount", len(result.MilestoneIDs)),
@@ -70,7 +72,7 @@ func Persist(ctx context.Context, projectID int64, plan *Plan, questLinks []db.Q
 		slog.Int("skippedQuestLinkCount", len(result.SkippedQuestLinks)),
 	)
 	if len(result.SkippedQuestLinks) > 0 {
-		logger.Warn(ctx, "some quest roadmap links were skipped",
+		log.Warn(ctx, "some quest roadmap links were skipped", nil,
 			slog.Int64("projectId", projectID),
 			slog.Int("skippedQuestLinkCount", len(result.SkippedQuestLinks)),
 		)

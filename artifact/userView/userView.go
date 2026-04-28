@@ -15,6 +15,8 @@ import (
 	"worker_GoVer/s3"
 )
 
+var log = logger.WithComponent("userView")
+
 func extractJSONObject(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.Index(s, "{"); i != -1 {
@@ -28,7 +30,7 @@ func extractJSONObject(s string) string {
 // Generate는 projectContext 파일 기반으로 UserView를 AI 생성하고 파일로 저장합니다.
 // 반환값: 저장된 파일 경로
 func Generate(ctx context.Context, input GenerateInput, projCtxPath string, projectPath string) (string, error) {
-	logger.Info(ctx, "userView generation start",
+	log.Trace(ctx, "userView generation start",
 		slog.Int("version", input.Version),
 		slog.Int64("userId", input.UserID),
 	)
@@ -103,7 +105,7 @@ func Generate(ctx context.Context, input GenerateInput, projCtxPath string, proj
 		return "", fmt.Errorf("failed to write user view: %w", err)
 	}
 
-	logger.Info(ctx, "userView saved", slog.String("path", savePath))
+	log.Trace(ctx, "userView saved", slog.String("path", savePath))
 	return savePath, nil
 }
 
@@ -141,7 +143,7 @@ func Persist(ctx context.Context, filePath string, newKBID *int64, installationI
 	if err != nil {
 		return 0, url, fmt.Errorf("userView DB insert failed: %w", err)
 	}
-	logger.Info(ctx, "USER_VIEW saved",
+	log.Trace(ctx, "USER_VIEW saved",
 		slog.Int("version", version),
 		slog.String("url", url),
 	)

@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"worker_GoVer/ai"
 	"worker_GoVer/db"
-	"worker_GoVer/logger"
 )
 
 type MilestoneEvalRequest struct {
@@ -87,7 +86,7 @@ func EvaluateMilestones(ctx context.Context, request *MilestoneEvalRequest, proj
 	requestJSON, _ := json.Marshal(request)
 
 	p := ai.MilestoneEvalPrompt(string(requestJSON))
-	logger.Info(ctx, "milestone evaluation start", slog.Int("milestoneCount", len(request.Milestones)))
+	log.Trace(ctx, "milestone evaluation start", slog.Int("milestoneCount", len(request.Milestones)))
 
 	files := []string{projectContextPath}
 	if diffPath != "" {
@@ -109,7 +108,7 @@ func EvaluateMilestones(ctx context.Context, request *MilestoneEvalRequest, proj
 		return nil, fmt.Errorf("failed to parse milestone eval response: %w", err)
 	}
 
-	logger.Info(ctx, "milestone evaluation completed", slog.Int("evaluations", len(response.MilestoneEvaluations)))
+	log.Trace(ctx, "milestone evaluation completed", slog.Int("evaluations", len(response.MilestoneEvaluations)))
 	return &response, nil
 }
 
@@ -127,7 +126,7 @@ func SaveMilestoneEvalResults(ctx context.Context, jobID int64, request *Milesto
 	for _, eval := range response.MilestoneEvaluations {
 		currentStatus, known := currentStatusByID[eval.ProjectMilestoneID]
 		if !known {
-			logger.Warn(ctx, "skipping evaluation for unknown milestone",
+			log.Warn(ctx, "skipping evaluation for unknown milestone", nil,
 				slog.Int64("milestoneId", eval.ProjectMilestoneID),
 			)
 			continue
@@ -136,13 +135,13 @@ func SaveMilestoneEvalResults(ctx context.Context, jobID int64, request *Milesto
 		newStatus := normalizeMilestoneStatus(eval.EvaluationResult)
 
 		if err := db.InsertMilestoneEvaluation(eval.ProjectMilestoneID, jobID, newStatus, eval.ConfidenceScore, eval.Reason, eval.ProgressNote); err != nil {
-			logger.Error(ctx, "failed to insert milestone evaluation", err, slog.Int64("milestoneId", eval.ProjectMilestoneID))
+			log.Error(ctx, "failed to insert milestone evaluation", err, slog.Int64("milestoneId", eval.ProjectMilestoneID))
 			continue
 		}
 
 		if shouldUpgrade(currentStatus, newStatus) {
 			if err := db.UpdateMilestoneStatus(eval.ProjectMilestoneID, newStatus); err != nil {
-				logger.Error(ctx, "failed to update milestone status", err, slog.Int64("milestoneId", eval.ProjectMilestoneID))
+				log.Error(ctx, "failed to update milestone status", err, slog.Int64("milestoneId", eval.ProjectMilestoneID))
 				continue
 			}
 			prevStatuses[eval.ProjectMilestoneID] = currentStatus
@@ -150,7 +149,7 @@ func SaveMilestoneEvalResults(ctx context.Context, jobID int64, request *Milesto
 		}
 	}
 
-	logger.Info(ctx, "milestone eval results saved",
+	log.Trace(ctx, "milestone eval results saved",
 		slog.Int("evaluations", len(response.MilestoneEvaluations)),
 		slog.Int("statusUpdates", len(changedIDs)),
 	)

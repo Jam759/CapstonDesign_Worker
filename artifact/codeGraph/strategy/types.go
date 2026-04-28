@@ -1,5 +1,12 @@
 package strategy
 
+import (
+	"context"
+	"worker_GoVer/logger"
+)
+
+var log = logger.WithComponent("codeGraph")
+
 // Node는 코드 그래프의 노드 (함수, 구조체, 변수, 상수 등)
 type Node struct {
 	ID       string `json:"id"`
@@ -37,7 +44,7 @@ type CodeGraph struct {
 // CodeGraphStrategy는 언어별 코드 그래프 생성 전략 인터페이스
 type CodeGraphStrategy interface {
 	SupportedExtensions() []string
-	Analyze(projectPath string) (*CodeGraph, error)
+	Analyze(ctx context.Context, projectPath string) (*CodeGraph, error)
 }
 
 type GoStrategy struct{}

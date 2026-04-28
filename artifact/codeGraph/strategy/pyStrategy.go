@@ -9,13 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"worker_GoVer/logger"
 )
-
-// logf는 내부 상세 로그용 헬퍼입니다. traceId 없이 기본 로거로 전달됩니다.
-func logf(format string, args ...any) {
-	logger.Info(context.Background(), fmt.Sprintf(format, args...), slog.String("component", "codeGraph/py"))
-}
 
 var (
 	reClass      = regexp.MustCompile(`^(\s*)class\s+(\w+)`)
@@ -29,9 +23,9 @@ func (p PythonStrategy) SupportedExtensions() []string {
 	return []string{".py"}
 }
 
-func (p PythonStrategy) Analyze(projectPath string) (*CodeGraph, error) {
+func (p PythonStrategy) Analyze(ctx context.Context, projectPath string) (*CodeGraph, error) {
 	graph := &CodeGraph{Language: "python"}
-	logf("[PyStrategy] start analyzing: %s", projectPath)
+	log.Trace(ctx, "py analysis start", slog.String("path", projectPath))
 
 	fileCount := 0
 	err := filepath.Walk(projectPath, func(path string, info os.FileInfo, err error) error {
@@ -42,7 +36,7 @@ func (p PythonStrategy) Analyze(projectPath string) (*CodeGraph, error) {
 			name := info.Name()
 			if name == ".git" || name == "artifact" || name == "__pycache__" ||
 				name == ".venv" || name == "venv" || name == "node_modules" {
-				logf("[PyStrategy] skip dir: %s", path)
+				log.Trace(ctx, "py skip dir", slog.String("path", path))
 				return filepath.SkipDir
 			}
 			return nil
@@ -51,8 +45,8 @@ func (p PythonStrategy) Analyze(projectPath string) (*CodeGraph, error) {
 			return nil
 		}
 		relPath, _ := filepath.Rel(projectPath, path)
-		logf("[PyStrategy] parsing: %s", relPath)
-		p.parseFile(graph, path, relPath)
+		log.Trace(ctx, "py parsing file", slog.String("file", relPath))
+		p.parseFile(ctx, graph, path, relPath)
 		fileCount++
 		return nil
 	})
@@ -60,8 +54,12 @@ func (p PythonStrategy) Analyze(projectPath string) (*CodeGraph, error) {
 		return nil, fmt.Errorf("failed to walk project: %w", err)
 	}
 
-	logf("[PyStrategy] done: files=%d nodes=%d edges=%d imports=%d",
-		fileCount, len(graph.Nodes), len(graph.Edges), len(graph.Imports))
+	log.Trace(ctx, "py analysis done",
+		slog.Int("files", fileCount),
+		slog.Int("nodes", len(graph.Nodes)),
+		slog.Int("edges", len(graph.Edges)),
+		slog.Int("imports", len(graph.Imports)),
+	)
 	return graph, nil
 }
 
@@ -70,17 +68,16 @@ type classFrame struct {
 	indent int
 }
 
-func (p PythonStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
+func (p PythonStrategy) parseFile(ctx context.Context, graph *CodeGraph, absPath, relPath string) {
 	f, err := os.Open(absPath)
 	if err != nil {
-		logf("[PyStrategy] failed to open file %s: %v", relPath, err)
+		log.Warn(ctx, "py failed to open file", err, slog.String("file", relPath))
 		return
 	}
 	defer f.Close()
 
 	modName := p.moduleName(relPath)
 
-	// 현재 함수 노드 (call edge 추출용)
 	type funcFrame struct {
 		nodeID    string
 		indent    int
@@ -155,9 +152,12 @@ func (p PythonStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 		// class
 		if m := reClass.FindStringSubmatch(line); m != nil {
 			className := m[2]
-			logf("[PyStrategy] class: %s (line %d) in %s", className, lineNum, relPath)
+			log.Trace(ctx, "py found class",
+				slog.String("class", className),
+				slog.Int("line", lineNum),
+				slog.String("file", relPath),
+			)
 			nodeID := fmt.Sprintf("%s.%s", modName, className)
-			// 부모 클래스 implements edge
 			if idx := strings.Index(line, "("); idx != -1 {
 				end := strings.Index(line, ")")
 				if end > idx {
@@ -191,7 +191,11 @@ func (p PythonStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 		// def
 		if m := reFunc.FindStringSubmatch(line); m != nil {
 			funcName := m[2]
-			logf("[PyStrategy] func: %s (line %d) in %s", funcName, lineNum, relPath)
+			log.Trace(ctx, "py found func",
+				slog.String("func", funcName),
+				slog.Int("line", lineNum),
+				slog.String("file", relPath),
+			)
 			kind := "function"
 			receiver := ""
 			var nodeID string
@@ -225,7 +229,6 @@ func (p PythonStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 			matches := reCall.FindAllStringSubmatch(line, -1)
 			for _, cm := range matches {
 				callee := cm[1]
-				// 키워드, 빌트인 제외
 				if p.isBuiltin(callee) {
 					continue
 				}
@@ -239,7 +242,6 @@ func (p PythonStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 	}
 }
 
-// moduleName은 상대 경로를 모듈 이름으로 변환합니다 (예: "api/views.py" → "api.views")
 func (p PythonStrategy) moduleName(relPath string) string {
 	name := strings.TrimSuffix(relPath, ".py")
 	name = strings.ReplaceAll(name, string(filepath.Separator), ".")
@@ -247,7 +249,6 @@ func (p PythonStrategy) moduleName(relPath string) string {
 	return name
 }
 
-// indentLevel은 줄의 앞 공백 수를 반환합니다 (tab=4)
 func (p PythonStrategy) indentLevel(line string) int {
 	count := 0
 	for _, ch := range line {
@@ -262,7 +263,6 @@ func (p PythonStrategy) indentLevel(line string) int {
 	return count
 }
 
-// findBlockEnd는 블록의 마지막 줄 번호를 반환합니다
 func (p PythonStrategy) findBlockEnd(lines []string, startIdx int) int {
 	baseIndent := p.indentLevel(lines[startIdx])
 	for i := startIdx + 1; i < len(lines); i++ {
@@ -271,7 +271,7 @@ func (p PythonStrategy) findBlockEnd(lines []string, startIdx int) int {
 			continue
 		}
 		if p.indentLevel(line) <= baseIndent {
-			return i // 1-indexed이므로 i (exclusive)
+			return i
 		}
 	}
 	return len(lines)

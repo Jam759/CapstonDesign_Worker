@@ -24,6 +24,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+var log = logger.WithComponent("git")
+
 // GitHub App JWT 생성 (10분 유효)
 func generateAppJWT(appID string, privateKey *rsa.PrivateKey) (string, error) {
 	now := time.Now()
@@ -74,7 +76,7 @@ func getInstallationToken(appJWT string, installationID int64) (string, error) {
 // repoFullName: "owner/repo" 형식
 // branchName: 클론할 브랜치명
 func CloneRepository(ctx context.Context, installationID int64, repoFullName string, localPath string, branchName string) error {
-	logger.Info(ctx, "git clone start",
+	log.Trace(ctx, "git clone start",
 		slog.String("repo", repoFullName),
 		slog.String("branch", branchName),
 		slog.Int64("installationID", installationID),
@@ -114,7 +116,7 @@ func CloneRepository(ctx context.Context, installationID int64, repoFullName str
 		return fmt.Errorf("failed to clone repository: %w", err)
 	}
 
-	logger.Info(ctx, "git clone done", slog.String("repo", repoFullName))
+	log.Trace(ctx, "git clone done", slog.String("repo", repoFullName))
 	return nil
 }
 
@@ -315,7 +317,7 @@ func Diff(ctx context.Context, clonePath string, beforeCommitSHA string, afterCo
 
 // Fetch는 원격 저장소의 최신 상태를 가져옵니다.
 func Fetch(ctx context.Context, clonePath string, installationID int64) error {
-	logger.Info(ctx, "git fetch start",
+	log.Trace(ctx, "git fetch start",
 		slog.Int64("installationID", installationID),
 		slog.String("clonePath", clonePath),
 	)
@@ -351,6 +353,6 @@ func Fetch(ctx context.Context, clonePath string, installationID int64) error {
 		return fmt.Errorf("failed to fetch: %w", err)
 	}
 
-	logger.Info(ctx, "git fetch done", slog.Int64("installationID", installationID))
+	log.Trace(ctx, "git fetch done", slog.Int64("installationID", installationID))
 	return nil
 }

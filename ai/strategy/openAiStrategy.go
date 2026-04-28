@@ -14,6 +14,8 @@ import (
 	"github.com/openai/openai-go/option"
 )
 
+var log = logger.WithComponent("ai")
+
 func (o OpenAiStrategy) GenerateMessageWithFiles(ctx context.Context, userPrompt string, systemPrompt string, filePaths []string) <-chan AiResult {
 	ch := make(chan AiResult, 1)
 	go func() {
@@ -22,9 +24,9 @@ func (o OpenAiStrategy) GenerateMessageWithFiles(ctx context.Context, userPrompt
 		client := openai.NewClient(option.WithAPIKey(cfg.OpenAIKey))
 
 		if len(filePaths) == 0 {
-			logger.Info(ctx, "AI chat completion start", slog.String("model", cfg.DefaultModel))
+			log.Trace(ctx, "AI chat completion start", slog.String("model", cfg.DefaultModel))
 		} else {
-			logger.Info(ctx, "AI assistant completion start",
+			log.Trace(ctx, "AI assistant completion start",
 				slog.String("model", cfg.DefaultModel),
 				slog.Int("fileCount", len(filePaths)),
 			)
@@ -38,9 +40,9 @@ func (o OpenAiStrategy) GenerateMessageWithFiles(ctx context.Context, userPrompt
 			data, err = o.assistantCompletion(ctx, &client, cfg, userPrompt, systemPrompt, filePaths)
 		}
 		if err != nil {
-			logger.Error(ctx, "AI request failed", err)
+			log.Error(ctx, "AI request failed", err)
 		} else {
-			logger.Info(ctx, "AI request completed", slog.String("model", cfg.DefaultModel))
+			log.Trace(ctx, "AI request completed", slog.String("model", cfg.DefaultModel))
 		}
 		ch <- AiResult{Data: data, Err: err}
 	}()
@@ -71,7 +73,7 @@ func (o OpenAiStrategy) chatCompletion(ctx context.Context, client *openai.Clien
 
 // 파일 있을 때: Assistants API + code_interpreter
 func (o OpenAiStrategy) assistantCompletion(ctx context.Context, client *openai.Client, cfg *config.Config, userPrompt, systemPrompt string, filePaths []string) (any, error) {
-	logger.Info(ctx, "AI file upload start", slog.Int("fileCount", len(filePaths)))
+	log.Trace(ctx, "AI file upload start", slog.Int("fileCount", len(filePaths)))
 	// 1. 파일 업로드 (goroutine 병렬)
 	type uploadResult struct {
 		fileID string
@@ -119,7 +121,7 @@ func (o OpenAiStrategy) assistantCompletion(ctx context.Context, client *openai.
 		return nil, uploadErr
 	}
 
-	logger.Info(ctx, "AI files uploaded", slog.Int("fileCount", len(fileIDs)))
+	log.Trace(ctx, "AI files uploaded", slog.Int("fileCount", len(fileIDs)))
 
 	// 2. Assistant 생성
 	codeInterpreterTool := openai.NewCodeInterpreterToolParam()
@@ -163,7 +165,7 @@ func (o OpenAiStrategy) assistantCompletion(ctx context.Context, client *openai.
 	}
 	defer client.Beta.Threads.Delete(ctx, thread.ID)
 
-	logger.Info(ctx, "AI assistant and thread created",
+	log.Trace(ctx, "AI assistant and thread created",
 		slog.String("assistantId", assistant.ID),
 		slog.String("threadId", thread.ID),
 	)
@@ -176,7 +178,7 @@ func (o OpenAiStrategy) assistantCompletion(ctx context.Context, client *openai.
 		return nil, fmt.Errorf("failed to create run: %w", err)
 	}
 
-	logger.Info(ctx, "AI run started", slog.String("runId", run.ID))
+	log.Trace(ctx, "AI run started", slog.String("runId", run.ID))
 
 	// 6. Polling (완료될 때까지 대기, 10초마다 로그)
 	pollCount := 0
@@ -188,7 +190,7 @@ func (o OpenAiStrategy) assistantCompletion(ctx context.Context, client *openai.
 		}
 		pollCount++
 		if pollCount%10 == 0 {
-			logger.Info(ctx, "AI run polling",
+			log.Trace(ctx, "AI run polling",
 				slog.String("runId", run.ID),
 				slog.Int("elapsedSec", pollCount),
 			)

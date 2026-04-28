@@ -6,6 +6,8 @@ import (
 	"worker_GoVer/logger"
 )
 
+var log = logger.WithComponent("sqs")
+
 // rollbackList는 분석 실패 시 순서 역순으로 실행할 정리 작업을 모읍니다.
 type rollbackList struct {
 	actions []func()
@@ -20,9 +22,9 @@ func (r *rollbackList) Run(ctx context.Context) {
 	if len(r.actions) == 0 {
 		return
 	}
-	logger.Warn(ctx, "analysis rollback started", slog.Int("stepCount", len(r.actions)))
+	log.Warn(ctx, "analysis rollback started", nil, slog.Int("stepCount", len(r.actions)))
 	for i := len(r.actions) - 1; i >= 0; i-- {
 		r.actions[i]()
 	}
-	logger.Info(ctx, "analysis rollback completed")
+	log.Trace(ctx, "analysis rollback completed")
 }

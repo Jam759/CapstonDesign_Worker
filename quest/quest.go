@@ -11,6 +11,8 @@ import (
 	"worker_GoVer/logger"
 )
 
+var log = logger.WithComponent("quest")
+
 func extractJSONObject(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.Index(s, "{"); i != -1 {
@@ -90,7 +92,7 @@ func GenerateAndEvaluateQuests(ctx context.Context, projCtxPath string, request 
 	requestJSON, _ := json.Marshal(request)
 
 	p := ai.QuestPrompt(string(requestJSON))
-	logger.Info(ctx, "quest generation start", slog.Int("questCount", len(request.Quests)))
+	log.Trace(ctx, "quest generation start", slog.Int("questCount", len(request.Quests)))
 	result := <-ai.GenerateMessageWithFiles(ctx, p.User, p.System, []string{projCtxPath})
 	if result.Err != nil {
 		return nil, fmt.Errorf("failed to generate quests: %w", result.Err)
@@ -107,7 +109,7 @@ func GenerateAndEvaluateQuests(ctx context.Context, projCtxPath string, request 
 		return nil, fmt.Errorf("failed to parse quest response: %w", err)
 	}
 
-	logger.Info(ctx, "quest generation completed",
+	log.Trace(ctx, "quest generation completed",
 		slog.Int("evaluations", len(response.QuestEvaluations)),
 		slog.Int("newQuests", len(response.NewQuests)),
 	)
@@ -137,7 +139,7 @@ func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64
 	for _, eval := range resp.QuestEvaluations {
 		if _, ok := knownQuestIDs[eval.UserAiQuestID]; !ok {
 			skippedEvaluationCount++
-			logger.Warn(ctx, "skipping quest evaluation for unknown quest id",
+			log.Warn(ctx, "skipping quest evaluation for unknown quest id", nil,
 				slog.Int64("questId", eval.UserAiQuestID),
 				slog.Int64("jobId", jobID),
 			)
@@ -145,22 +147,20 @@ func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64
 		}
 
 		if err := db.InsertQuestEvaluation(eval.UserAiQuestID, jobID, eval.EvaluationResult, eval.ConfidenceScore, eval.Reason, eval.ProgressNote); err != nil {
-			logger.Error(ctx, "failed to insert quest evaluation", err, slog.Int64("questId", eval.UserAiQuestID))
+			log.Error(ctx, "failed to insert quest evaluation", err, slog.Int64("questId", eval.UserAiQuestID))
 			continue
 		}
 		savedEvaluationCount++
 
 		if err := db.UpdateQuestLastEvaluatedAt(eval.UserAiQuestID); err != nil {
-			logger.Warn(ctx, "failed to update quest last_evaluated_at",
+			log.Warn(ctx, "failed to update quest last_evaluated_at", err,
 				slog.Int64("questId", eval.UserAiQuestID),
-				slog.String("reason", err.Error()),
 			)
 		}
 		if eval.EvaluationResult == "COMPLETED" {
 			if err := db.CompleteQuest(eval.UserAiQuestID); err != nil {
-				logger.Warn(ctx, "failed to complete quest",
+				log.Warn(ctx, "failed to complete quest", err,
 					slog.Int64("questId", eval.UserAiQuestID),
-					slog.String("reason", err.Error()),
 				)
 			} else {
 				completedIDs = append(completedIDs, eval.UserAiQuestID)
@@ -171,7 +171,7 @@ func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64
 	for _, nq := range resp.NewQuests {
 		id, err := db.InsertQuest(projectID, userID, nq.Title, nq.Description, nq.Hint, nq.AIGenerationReason, nq.CompletionGuide, nq.Category, nq.RewardExp, nq.ExpiredAt)
 		if err != nil {
-			logger.Error(ctx, "failed to insert new quest", err, slog.String("title", nq.Title))
+			log.Error(ctx, "failed to insert new quest", err, slog.String("title", nq.Title))
 		} else {
 			newQuestIDs = append(newQuestIDs, id)
 			if nq.RelatedMilestoneKey != "" {
@@ -183,7 +183,7 @@ func SaveResults(ctx context.Context, jobID int64, projectID int64, userID int64
 		}
 	}
 
-	logger.Info(ctx, "quest results saved",
+	log.Trace(ctx, "quest results saved",
 		slog.Int("savedEvaluations", savedEvaluationCount),
 		slog.Int("skippedEvaluations", skippedEvaluationCount),
 		slog.Int("newQuests", len(newQuestIDs)),
