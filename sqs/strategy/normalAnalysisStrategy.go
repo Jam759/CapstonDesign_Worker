@@ -16,7 +16,7 @@ import (
 	"worker_GoVer/db"
 	"worker_GoVer/disk"
 	"worker_GoVer/git"
-	"worker_GoVer/logger"
+	"worker_GoVer/keyword"
 	"worker_GoVer/quest"
 	"worker_GoVer/s3"
 )
@@ -34,7 +34,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	}
 
 	jobID := base.JobID
-	logger.AnalysisStarted(ctx, jobID,
+	log.AnalysisStarted(ctx, jobID,
 		slog.String("analysisType", "NORMAL_ANALYSIS_REQUEST"),
 		slog.String("repo", msg.RepositoryFullName),
 		slog.String("branch", msg.BranchName),
@@ -53,21 +53,21 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	jobClaimed := false
 
 	fail := func(err error) error {
-		logger.AnalysisFailed(ctx, jobID, err, time.Since(startAt).Milliseconds(),
+		log.AnalysisFailed(ctx, jobID, err, time.Since(startAt).Milliseconds(),
 			slog.String("analysisType", "NORMAL_ANALYSIS_REQUEST"),
 			slog.String("repo", msg.RepositoryFullName),
 		)
 		rb.Run(ctx)
 		if jobClaimed {
 			if dbErr := db.UpdateAnalysisJobStatus(jobIDInt, "NOTIFICATION_QUEUED"); dbErr != nil {
-				logger.Warn(ctx, "rollback: failed to mark job as NOTIFICATION_QUEUED", slog.String("reason", dbErr.Error()))
+				log.Warn(ctx, "rollback: failed to mark job as NOTIFICATION_QUEUED", dbErr)
 			}
 		}
 		return err
 	}
 
 	// 1. job 선점: ANALYSIS_JOB_QUEUED → ANALYSIS_JOB_RUNNING
-	claimStep := logger.StepStart(ctx, "job.claim", jobID)
+	claimStep := log.StepStart(ctx, "job.claim", jobID)
 	ok, err := db.ClaimAnalysisJob(jobIDInt)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "failed to claim job jobId=%s", jobID)
@@ -76,17 +76,17 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	}
 	if !ok {
 		claimStep.Complete(slog.String("status", "skipped"))
-		logger.Warn(ctx, "analysis job already claimed, skipping")
+		log.Warn(ctx, "analysis job already claimed, skipping", nil)
 		return nil, nil
 	}
 	claimStep.Complete()
 	jobClaimed = true
 
 	// 2. 디스크 정리
-	cleanupStep := logger.StepStart(ctx, "workspace.cleanup", jobID)
+	cleanupStep := log.StepStart(ctx, "workspace.cleanup", jobID)
 	if err := disk.IfNeedDoCleanWorkspace(ctx); err != nil {
 		cleanupStep.Fail(err)
-		logger.Warn(ctx, "workspace cleanup warning", slog.String("reason", err.Error()))
+		log.Warn(ctx, "workspace cleanup warning", err)
 	} else {
 		cleanupStep.Complete()
 	}
@@ -98,7 +98,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	)
 
 	// 4. clone or fetch
-	repoStep := logger.StepStart(ctx, "git.prepare", jobID, slog.String("localPath", localPath))
+	repoStep := log.StepStart(ctx, "git.prepare", jobID, slog.String("localPath", localPath))
 	exists, err := disk.IsExistDir(ctx, localPath)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to check dir")
@@ -121,7 +121,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	repoStep.Complete(slog.Bool("exists", exists))
 
 	// 5. 브랜치 체크아웃
-	checkoutBranchStep := logger.StepStart(ctx, "git.checkout_branch", jobID, slog.String("branch", msg.BranchName))
+	checkoutBranchStep := log.StepStart(ctx, "git.checkout_branch", jobID, slog.String("branch", msg.BranchName))
 	if err := git.CheckoutBranch(ctx, localPath, msg.BranchName); err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to checkout branch=%s", msg.BranchName)
 		checkoutBranchStep.Fail(wrapped)
@@ -130,7 +130,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	checkoutBranchStep.Complete()
 
 	// 6. afterCommit checkout
-	checkoutCommitStep := logger.StepStart(ctx, "git.checkout_commit", jobID, slog.String("afterCommit", msg.AfterCommit))
+	checkoutCommitStep := log.StepStart(ctx, "git.checkout_commit", jobID, slog.String("afterCommit", msg.AfterCommit))
 	if err := git.Checkout(ctx, localPath, msg.AfterCommit); err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to checkout afterCommit=%s", msg.AfterCommit)
 		checkoutCommitStep.Fail(wrapped)
@@ -139,7 +139,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	checkoutCommitStep.Complete()
 
 	// 7. lock
-	lockStep := logger.StepStart(ctx, "workspace.lock", jobID)
+	lockStep := log.StepStart(ctx, "workspace.lock", jobID)
 	locked, err := disk.IsLocked(ctx, localPath)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrWorkspaceLocked, 500, true, err, "failed to check lock jobId=%s", jobID)
@@ -159,7 +159,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	lockStep.Complete()
 	defer func() {
 		if err := disk.RemoveLockAtomic(ctx, localPath); err != nil {
-			logger.Warn(ctx, "failed to remove workspace lock", slog.String("reason", err.Error()))
+			log.Warn(ctx, "failed to remove workspace lock", err)
 		}
 	}()
 
@@ -179,7 +179,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 
 	// 9. baseline PROJECT_KB S3 다운로드
 	artifactDir := filepath.Join(localPath, "artifact")
-	downloadStep := logger.StepStart(ctx, "project_context.download", jobID)
+	downloadStep := log.StepStart(ctx, "project_context.download", jobID)
 	baselinePath, err := s3.DownloadProjectKB(ctx, latestKB.S3Bucket, latestKB.StoredURL, artifactDir)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrS3Operation, 500, true, err, "failed to download baseline KB projectId=%d", msg.ProjectID)
@@ -189,7 +189,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	downloadStep.Complete()
 
 	// 10. git diff 생성
-	diffStep := logger.StepStart(ctx, "git.diff", jobID)
+	diffStep := log.StepStart(ctx, "git.diff", jobID)
 	diffPath, err := git.Diff(ctx, localPath, baseCommit, msg.AfterCommit, msg.IsMerge)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to generate diff before=%s after=%s", baseCommit, msg.AfterCommit)
@@ -199,11 +199,11 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	diffStep.Complete()
 
 	// 11. 변경 파일 목록
-	diffFileStep := logger.StepStart(ctx, "git.diff_files", jobID)
+	diffFileStep := log.StepStart(ctx, "git.diff_files", jobID)
 	diffFiles, err := git.DiffFileList(ctx, localPath, baseCommit, msg.AfterCommit, msg.IsMerge)
 	if err != nil {
 		diffFileStep.Fail(err)
-		logger.Warn(ctx, "failed to get diff file list", slog.String("reason", err.Error()))
+		log.Warn(ctx, "failed to get diff file list", err)
 	} else {
 		diffFileStep.Complete(slog.Int("fileCount", len(diffFiles)))
 	}
@@ -216,7 +216,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	}
 
 	// 12. CodeGraph 생성
-	graphStep := logger.StepStart(ctx, "codegraph.generate", jobID)
+	graphStep := log.StepStart(ctx, "codegraph.generate", jobID)
 	graphPath, err := codeGraph.GenerateCodeGraph(ctx, localPath)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrCodeGraphGeneration, 500, true, err, "failed to generate code graph repo=%s", msg.RepositoryFullName)
@@ -228,10 +228,10 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	// 13. incremental ProjectContext 업데이트
 	kbVersion, err := db.NextReportVersion(msg.ProjectID, "PROJECT_KB")
 	if err != nil {
-		logger.Warn(ctx, "failed to get project KB version, defaulting to 1", slog.String("reason", err.Error()))
+		log.Warn(ctx, "failed to get project KB version, defaulting to 1", err)
 		kbVersion = 1
 	}
-	updateContextStep := logger.StepStart(ctx, "project_context.update", jobID, slog.Int("version", kbVersion))
+	updateContextStep := log.StepStart(ctx, "project_context.update", jobID, slog.Int("version", kbVersion))
 	ctxPath, err := projectContext.UpdateProjectContext(
 		ctx,
 		localPath,
@@ -254,13 +254,13 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	// 14. ProjectKB S3 업로드 + DB 저장
 	result := &StrategyResult{}
 	previousKBID := int64(latestKB.ProjectAnalysisReportsID)
-	persistStep := logger.StepStart(ctx, "project_context.persist", jobID, slog.Int("version", kbVersion))
+	persistStep := log.StepStart(ctx, "project_context.persist", jobID, slog.Int("version", kbVersion))
 	newKBID, newKBURL, err := projectContext.Persist(ctx, ctxPath, &previousKBID, msg.PushUserInstallationID, msg.RepositoryID, msg.ProjectID, kbVersion, cfg.AWSS3Bucket, baseCommit, msg.AfterCommit)
 	if err != nil {
 		persistStep.Fail(err)
 		if newKBURL != "" {
 			if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, newKBURL); delErr != nil {
-				logger.Warn(ctx, "rollback: failed to delete orphaned PROJECT_KB from S3", slog.String("reason", delErr.Error()))
+				log.Warn(ctx, "rollback: failed to delete orphaned PROJECT_KB from S3", delErr)
 			}
 		}
 		return nil, fail(apperrors.Newf(apperrors.ErrS3Operation, 500, true, err, "failed to persist project context"))
@@ -269,15 +269,15 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	persistStep.Complete(slog.Int64("projectKbId", newKBID))
 	rb.Add(func() {
 		if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, newKBURL); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete PROJECT_KB from S3", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete PROJECT_KB from S3", delErr)
 		}
 		if delErr := db.DeleteAnalysisReport(newKBID); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete PROJECT_KB report from DB", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete PROJECT_KB report from DB", delErr)
 		}
 	})
 
 	// 15. Quest 평가 및 생성
-	questStep := logger.StepStart(ctx, "quest.generate", jobID)
+	questStep := log.StepStart(ctx, "quest.generate", jobID)
 	questReq, err := quest.BuildQuestRequest(ctx, jobIDInt, msg.ProjectID, base.UserID, msg.ProjectTitle, msg.ProjectDescription, msg.ProjectGoal, msg.RepositoryFullName, msg.BranchName)
 	if err != nil {
 		questStep.Fail(err)
@@ -291,13 +291,13 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	result.CompleteQuestIDs, result.NewQuestIDs, _ = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, base.UserID, questReq, questResp)
 	rb.Add(func() {
 		if delErr := db.DeleteQuestEvaluationsByJobID(jobIDInt); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete quest evaluations", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete quest evaluations", delErr)
 		}
 		if delErr := db.DeleteQuestsByIDs(result.NewQuestIDs); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete new quests", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete new quests", delErr)
 		}
 		if delErr := db.RevertQuestCompletion(result.CompleteQuestIDs); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to revert quest completion", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to revert quest completion", delErr)
 		}
 	})
 	questStep.Complete(
@@ -306,18 +306,18 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	)
 
 	// 16. 마일스톤 진행 평가
-	milestoneEvalStep := logger.StepStart(ctx, "roadmap.milestone_eval", jobID)
+	milestoneEvalStep := log.StepStart(ctx, "roadmap.milestone_eval", jobID)
 	milestoneReq, err := roadmap.BuildMilestoneEvalRequest(ctx, jobIDInt, msg.ProjectID, msg.ProjectTitle, msg.ProjectDescription, msg.ProjectGoal)
 	if err != nil {
 		milestoneEvalStep.Fail(err)
-		logger.Warn(ctx, "failed to build milestone eval request", slog.String("reason", err.Error()))
+		log.Warn(ctx, "failed to build milestone eval request", err)
 	} else if milestoneReq == nil {
 		milestoneEvalStep.Complete(slog.String("status", "no_active_milestones"))
 	} else {
 		milestoneResp, err := roadmap.EvaluateMilestones(ctx, milestoneReq, ctxPath, diffPath)
 		if err != nil {
 			milestoneEvalStep.Fail(err)
-			logger.Warn(ctx, "milestone evaluation failed", slog.String("reason", err.Error()))
+			log.Warn(ctx, "milestone evaluation failed", err)
 		} else {
 			changedIDs, prevStatuses := roadmap.SaveMilestoneEvalResults(ctx, jobIDInt, milestoneReq, milestoneResp)
 			milestoneEvalStep.Complete(
@@ -327,10 +327,10 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 			if len(changedIDs) > 0 {
 				rb.Add(func() {
 					if delErr := db.DeleteMilestoneEvaluationsByJobID(jobIDInt); delErr != nil {
-						logger.Warn(ctx, "rollback: failed to delete milestone evaluations", slog.String("reason", delErr.Error()))
+						log.Warn(ctx, "rollback: failed to delete milestone evaluations", delErr)
 					}
 					if revertErr := db.RevertMilestoneStatuses(prevStatuses); revertErr != nil {
-						logger.Warn(ctx, "rollback: failed to revert milestone statuses", slog.String("reason", revertErr.Error()))
+						log.Warn(ctx, "rollback: failed to revert milestone statuses", revertErr)
 					}
 				})
 			}
@@ -340,7 +340,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	// 17. UserView 생성
 	uvVersion, err := db.NextReportVersion(msg.ProjectID, "USER_VIEW")
 	if err != nil {
-		logger.Warn(ctx, "failed to get user view version, defaulting to 1", slog.String("reason", err.Error()))
+		log.Warn(ctx, "failed to get user view version, defaulting to 1", err)
 		uvVersion = 1
 	}
 	uvInput := userView.GenerateInput{
@@ -357,7 +357,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 		CompletedQuestIDs:  result.CompleteQuestIDs,
 		NewQuestIDs:        result.NewQuestIDs,
 	}
-	userViewStep := logger.StepStart(ctx, "user_view.generate", jobID, slog.Int("version", uvVersion))
+	userViewStep := log.StepStart(ctx, "user_view.generate", jobID, slog.Int("version", uvVersion))
 	uvPath, err := userView.Generate(ctx, uvInput, ctxPath, localPath)
 	if err != nil {
 		userViewStep.Fail(err)
@@ -368,7 +368,7 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 		userViewStep.Fail(err)
 		if uvURL != "" {
 			if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, uvURL); delErr != nil {
-				logger.Warn(ctx, "rollback: failed to delete orphaned USER_VIEW from S3", slog.String("reason", delErr.Error()))
+				log.Warn(ctx, "rollback: failed to delete orphaned USER_VIEW from S3", delErr)
 			}
 		}
 		return nil, fail(apperrors.Newf(apperrors.ErrS3Operation, 500, true, err, "failed to persist user view"))
@@ -377,32 +377,41 @@ func (s NormalAnalysisStrategy) Handle(ctx context.Context, base SqsBaseMessage)
 	userViewStep.Complete(slog.Int64("userViewReportId", uvID))
 	rb.Add(func() {
 		if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, uvURL); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete USER_VIEW from S3", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete USER_VIEW from S3", delErr)
 		}
 		if delErr := db.DeleteAnalysisReport(uvID); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete USER_VIEW report from DB", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete USER_VIEW report from DB", delErr)
 		}
 	})
 
-	// 18. touch 파일 업데이트
-	touchStep := logger.StepStart(ctx, "workspace.touch", jobID)
+	// 18. 검색 키워드 추출
+	kwStep := log.StepStart(ctx, "keyword.extract", jobID)
+	if err := keyword.ExtractAndSave(ctx, jobIDInt, msg.ProjectID, ctxPath); err != nil {
+		kwStep.Fail(err)
+		log.Warn(ctx, "keyword extraction failed, skipping", err)
+	} else {
+		kwStep.Complete()
+	}
+
+	// 20. touch 파일 업데이트
+	touchStep := log.StepStart(ctx, "workspace.touch", jobID)
 	if _, err := disk.CreateTouchFileAtomic(ctx, localPath); err != nil {
 		touchStep.Fail(err)
-		logger.Warn(ctx, "failed to update touch file", slog.String("reason", err.Error()))
+		log.Warn(ctx, "failed to update touch file", err)
 	} else {
 		touchStep.Complete()
 	}
 
-	// 19. 작업 완료
-	statusStep := logger.StepStart(ctx, "job.complete", jobID)
+	// 21. 작업 완료
+	statusStep := log.StepStart(ctx, "job.complete", jobID)
 	if err := db.UpdateAnalysisJobStatus(jobIDInt, "ANALYSIS_JOB_COMPLETED"); err != nil {
 		statusStep.Fail(err)
-		logger.Warn(ctx, "failed to update analysis job status to completed", slog.String("reason", err.Error()))
+		log.Warn(ctx, "failed to update analysis job status to completed", err)
 	} else {
 		statusStep.Complete()
 	}
 
-	logger.AnalysisCompleted(ctx, jobID, time.Since(startAt).Milliseconds(),
+	log.AnalysisCompleted(ctx, jobID, time.Since(startAt).Milliseconds(),
 		slog.String("analysisType", "NORMAL_ANALYSIS_REQUEST"),
 		slog.String("repo", msg.RepositoryFullName),
 	)

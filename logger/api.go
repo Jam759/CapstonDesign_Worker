@@ -11,7 +11,6 @@ import (
 	"worker_GoVer/metrics"
 )
 
-// errorInfo는 메인서버 JSON 로그의 error 필드 구조에 맞춥니다.
 type errorInfo struct {
 	Message    string `json:"message"`
 	Code       string `json:"code,omitempty"`
@@ -19,7 +18,6 @@ type errorInfo struct {
 	Retryable  bool   `json:"retryable,omitempty"`
 }
 
-// errorAttr은 error를 메인서버 포맷의 error 필드로 변환합니다.
 func errorAttr(err error) slog.Attr {
 	if err == nil {
 		return slog.Attr{}
@@ -39,7 +37,6 @@ func errorAttr(err error) slog.Attr {
 	})
 }
 
-// contextAttrs는 ctx에서 traceId/jobId를 꺼내 slog.Attr 슬라이스로 반환합니다.
 func contextAttrs(ctx context.Context) []slog.Attr {
 	var attrs []slog.Attr
 	if tid := TraceIDFromContext(ctx); tid != "" {
@@ -51,7 +48,6 @@ func contextAttrs(ctx context.Context) []slog.Attr {
 	return attrs
 }
 
-// callerAttrs는 로그 호출 지점의 className(패키지명) / method를 추출합니다.
 func callerAttrs(skip int) []slog.Attr {
 	pc, _, _, ok := runtime.Caller(skip)
 	if !ok {
@@ -61,7 +57,7 @@ func callerAttrs(skip int) []slog.Attr {
 	if fn == nil {
 		return nil
 	}
-	full := fn.Name() // 예: worker_GoVer/sqs.(*Consumer).handleAnalysisMessage
+	full := fn.Name()
 	className := ""
 	method := full
 	if i := strings.LastIndex(full, "/"); i >= 0 {
@@ -118,26 +114,38 @@ func attrString(attrs []slog.Attr, key, fallback string) string {
 	return fallback
 }
 
-// logAttrs는 최종적으로 slog에 로그를 보냅니다.
-func logAttrs(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
+// logAttrsSkip is the core logging function. skip is the number of frames to skip for caller info.
+func logAttrsSkip(ctx context.Context, skip int, level slog.Level, msg string, attrs ...slog.Attr) {
 	if global == nil {
 		return
 	}
-	all := mergeAttrs(contextAttrs(ctx), callerAttrs(3), attrs)
+	all := mergeAttrs(contextAttrs(ctx), callerAttrs(skip), attrs)
 	global.LogAttrs(ctx, level, msg, all...)
 }
 
-// Info는 INFO 레벨로 로그를 기록합니다.
+// logAttrs emits a log with skip=4: logAttrsSkip→logAttrs→pkg_level_fn→user_code.
+func logAttrs(ctx context.Context, level slog.Level, msg string, attrs ...slog.Attr) {
+	logAttrsSkip(ctx, 4, level, msg, attrs...)
+}
+
+// ── Package-level basics ─────────────────────────────────────────────────────
+
+func Trace(ctx context.Context, msg string, attrs ...slog.Attr) {
+	logAttrs(ctx, LevelTrace, msg, attrs...)
+}
+
+func Debug(ctx context.Context, msg string, attrs ...slog.Attr) {
+	logAttrs(ctx, slog.LevelDebug, msg, attrs...)
+}
+
 func Info(ctx context.Context, msg string, attrs ...slog.Attr) {
 	logAttrs(ctx, slog.LevelInfo, msg, attrs...)
 }
 
-// Warn은 WARN 레벨로 로그를 기록합니다.
 func Warn(ctx context.Context, msg string, attrs ...slog.Attr) {
 	logAttrs(ctx, slog.LevelWarn, msg, attrs...)
 }
 
-// Error는 ERROR 레벨로 로그를 기록합니다. err가 nil이 아니면 error 필드가 추가됩니다.
 func Error(ctx context.Context, msg string, err error, attrs ...slog.Attr) {
 	if err != nil {
 		attrs = append(attrs, errorAttr(err))
@@ -145,46 +153,81 @@ func Error(ctx context.Context, msg string, err error, attrs ...slog.Attr) {
 	logAttrs(ctx, slog.LevelError, msg, attrs...)
 }
 
-// Debug는 DEBUG 레벨로 로그를 기록합니다.
-func Debug(ctx context.Context, msg string, attrs ...slog.Attr) {
-	logAttrs(ctx, slog.LevelDebug, msg, attrs...)
+// ── ComponentLogger ──────────────────────────────────────────────────────────
+
+// ComponentLogger is a package-scoped logger that automatically appends a component label.
+type ComponentLogger struct {
+	component string
 }
 
-// ============================================================
-// SQS 이벤트 헬퍼
-// ============================================================
+// WithComponent returns a ComponentLogger for the given component name.
+func WithComponent(component string) *ComponentLogger {
+	return &ComponentLogger{component: component}
+}
 
-// SQSReceived는 SQS 메시지를 수신했을 때 기록합니다.
-func SQSReceived(ctx context.Context, jobID, messageType string, extra ...slog.Attr) {
+func (c *ComponentLogger) compAttr() slog.Attr {
+	return slog.String("component", c.component)
+}
+
+func (c *ComponentLogger) Trace(ctx context.Context, msg string, attrs ...slog.Attr) {
+	logAttrsSkip(ctx, 3, LevelTrace, msg, append([]slog.Attr{c.compAttr()}, attrs...)...)
+}
+
+func (c *ComponentLogger) Debug(ctx context.Context, msg string, attrs ...slog.Attr) {
+	logAttrsSkip(ctx, 3, slog.LevelDebug, msg, append([]slog.Attr{c.compAttr()}, attrs...)...)
+}
+
+func (c *ComponentLogger) Info(ctx context.Context, msg string, attrs ...slog.Attr) {
+	logAttrsSkip(ctx, 3, slog.LevelInfo, msg, append([]slog.Attr{c.compAttr()}, attrs...)...)
+}
+
+// Warn logs at WARN level. err may be nil.
+func (c *ComponentLogger) Warn(ctx context.Context, msg string, err error, attrs ...slog.Attr) {
+	if err != nil {
+		attrs = append(attrs, errorAttr(err))
+	}
+	logAttrsSkip(ctx, 3, slog.LevelWarn, msg, append([]slog.Attr{c.compAttr()}, attrs...)...)
+}
+
+// Error logs at ERROR level. err may be nil.
+func (c *ComponentLogger) Error(ctx context.Context, msg string, err error, attrs ...slog.Attr) {
+	if err != nil {
+		attrs = append(attrs, errorAttr(err))
+	}
+	logAttrsSkip(ctx, 3, slog.LevelError, msg, append([]slog.Attr{c.compAttr()}, attrs...)...)
+}
+
+// ── SQS domain helpers ────────────────────────────────────────────────────────
+
+func (c *ComponentLogger) SQSReceived(ctx context.Context, jobID, messageType string, extra ...slog.Attr) {
 	metrics.RecordSQSReceived(messageType)
-	attrs := []slog.Attr{
+	attrs := append([]slog.Attr{
+		c.compAttr(),
 		slog.String("category", CategorySQS),
 		slog.String("eventType", EventSQSReceived),
 		slog.String("jobId", jobID),
 		slog.String("messageType", messageType),
-	}
-	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelInfo, "SQS message received", attrs...)
+	}, extra...)
+	logAttrsSkip(ctx, 3, slog.LevelInfo, "SQS message received", attrs...)
 }
 
-// SQSProcessed는 SQS 메시지 처리를 성공적으로 완료했을 때 기록합니다.
-func SQSProcessed(ctx context.Context, jobID, messageType string, durationMs int64, extra ...slog.Attr) {
+func (c *ComponentLogger) SQSProcessed(ctx context.Context, jobID, messageType string, durationMs int64, extra ...slog.Attr) {
 	metrics.RecordSQSFinished(messageType, "processed", durationMs)
-	attrs := []slog.Attr{
+	attrs := append([]slog.Attr{
+		c.compAttr(),
 		slog.String("category", CategorySQS),
 		slog.String("eventType", EventSQSProcessed),
 		slog.String("jobId", jobID),
 		slog.String("messageType", messageType),
 		slog.Int64("durationMs", durationMs),
-	}
-	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelInfo, "SQS message processed", attrs...)
+	}, extra...)
+	logAttrsSkip(ctx, 3, slog.LevelInfo, "SQS message processed", attrs...)
 }
 
-// SQSFailed는 SQS 메시지 처리 실패 시 기록합니다.
-func SQSFailed(ctx context.Context, jobID, messageType string, err error, durationMs int64, extra ...slog.Attr) {
+func (c *ComponentLogger) SQSFailed(ctx context.Context, jobID, messageType string, err error, durationMs int64, extra ...slog.Attr) {
 	metrics.RecordSQSFinished(messageType, "failed", durationMs)
 	attrs := []slog.Attr{
+		c.compAttr(),
 		slog.String("category", CategorySQS),
 		slog.String("eventType", EventSQSFailed),
 		slog.String("jobId", jobID),
@@ -194,43 +237,38 @@ func SQSFailed(ctx context.Context, jobID, messageType string, err error, durati
 	if err != nil {
 		attrs = append(attrs, errorAttr(err))
 	}
-	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelError, "SQS message failed", attrs...)
+	logAttrsSkip(ctx, 3, slog.LevelError, "SQS message failed", append(attrs, extra...)...)
 }
 
-// ============================================================
-// ANALYSIS 이벤트 헬퍼
-// ============================================================
+// ── Analysis domain helpers ───────────────────────────────────────────────────
 
-// AnalysisStarted는 분석 작업 시작을 기록합니다.
-func AnalysisStarted(ctx context.Context, jobID string, extra ...slog.Attr) {
+func (c *ComponentLogger) AnalysisStarted(ctx context.Context, jobID string, extra ...slog.Attr) {
 	metrics.RecordAnalysisStarted(attrString(extra, "analysisType", "unknown"))
-	attrs := []slog.Attr{
+	attrs := append([]slog.Attr{
+		c.compAttr(),
 		slog.String("category", CategoryAnalysis),
 		slog.String("eventType", EventAnalysisStarted),
 		slog.String("jobId", jobID),
-	}
-	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelDebug, "analysis started", attrs...)
+	}, extra...)
+	logAttrsSkip(ctx, 3, slog.LevelInfo, "analysis started", attrs...)
 }
 
-// AnalysisCompleted는 분석 작업 완료를 기록합니다.
-func AnalysisCompleted(ctx context.Context, jobID string, durationMs int64, extra ...slog.Attr) {
+func (c *ComponentLogger) AnalysisCompleted(ctx context.Context, jobID string, durationMs int64, extra ...slog.Attr) {
 	metrics.RecordAnalysisFinished(attrString(extra, "analysisType", "unknown"), "completed", durationMs)
-	attrs := []slog.Attr{
+	attrs := append([]slog.Attr{
+		c.compAttr(),
 		slog.String("category", CategoryAnalysis),
 		slog.String("eventType", EventAnalysisCompleted),
 		slog.String("jobId", jobID),
 		slog.Int64("durationMs", durationMs),
-	}
-	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelDebug, "analysis completed", attrs...)
+	}, extra...)
+	logAttrsSkip(ctx, 3, slog.LevelInfo, "analysis completed", attrs...)
 }
 
-// AnalysisFailed는 분석 작업 실패를 기록합니다.
-func AnalysisFailed(ctx context.Context, jobID string, err error, durationMs int64, extra ...slog.Attr) {
+func (c *ComponentLogger) AnalysisFailed(ctx context.Context, jobID string, err error, durationMs int64, extra ...slog.Attr) {
 	metrics.RecordAnalysisFinished(attrString(extra, "analysisType", "unknown"), "failed", durationMs)
 	attrs := []slog.Attr{
+		c.compAttr(),
 		slog.String("category", CategoryAnalysis),
 		slog.String("eventType", EventAnalysisFailed),
 		slog.String("jobId", jobID),
@@ -239,60 +277,51 @@ func AnalysisFailed(ctx context.Context, jobID string, err error, durationMs int
 	if err != nil {
 		attrs = append(attrs, errorAttr(err))
 	}
-	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelError, "analysis failed", attrs...)
+	logAttrsSkip(ctx, 3, slog.LevelError, "analysis failed", append(attrs, extra...)...)
 }
 
-// ============================================================
-// JOB_STEP 타이머 (하위 단계 트래킹)
-// ============================================================
+// ── Step timer ────────────────────────────────────────────────────────────────
 
-// StepTimer는 단일 작업 단계의 시작/완료/실패를 기록하는 타이머입니다.
-type StepTimer struct {
-	ctx      context.Context
-	stepName string
-	jobID    string
-	startAt  time.Time
-}
-
-// StepStart는 작업 단계 시작을 기록하고 완료 시점에 사용할 타이머를 반환합니다.
-// 사용법:
-//
-//	step := logger.StepStart(ctx, "git.clone", jobID, slog.String("repo", repo))
-//	if err := doWork(); err != nil { step.Fail(err); return err }
-//	step.Complete()
-func StepStart(ctx context.Context, stepName, jobID string, extra ...slog.Attr) *StepTimer {
+// StepStart records step start and returns a timer for recording completion or failure.
+func (c *ComponentLogger) StepStart(ctx context.Context, stepName, jobID string, extra ...slog.Attr) *StepTimer {
 	metrics.RecordStepStarted(stepName)
-	attrs := []slog.Attr{
+	attrs := append([]slog.Attr{
+		c.compAttr(),
 		slog.String("category", CategoryJobStep),
 		slog.String("eventType", EventStepStarted),
 		slog.String("jobId", jobID),
 		slog.String("stepName", stepName),
-	}
-	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelDebug, stepName+" started", attrs...)
-	return &StepTimer{ctx: ctx, stepName: stepName, jobID: jobID, startAt: time.Now()}
+	}, extra...)
+	logAttrsSkip(ctx, 3, slog.LevelDebug, stepName+" started", attrs...)
+	return &StepTimer{ctx: ctx, component: c.component, stepName: stepName, jobID: jobID, startAt: time.Now()}
 }
 
-// Complete는 작업 단계의 정상 완료를 기록합니다.
+// StepTimer tracks duration and outcome of a single job step.
+type StepTimer struct {
+	ctx       context.Context
+	component string
+	stepName  string
+	jobID     string
+	startAt   time.Time
+}
+
 func (s *StepTimer) Complete(extra ...slog.Attr) {
 	if s == nil {
 		return
 	}
 	durationMs := time.Since(s.startAt).Milliseconds()
 	metrics.RecordStepFinished(s.stepName, "completed", durationMs)
-	attrs := []slog.Attr{
+	attrs := append([]slog.Attr{
+		slog.String("component", s.component),
 		slog.String("category", CategoryJobStep),
 		slog.String("eventType", EventStepCompleted),
 		slog.String("jobId", s.jobID),
 		slog.String("stepName", s.stepName),
 		slog.Int64("durationMs", durationMs),
-	}
-	attrs = append(attrs, extra...)
-	logAttrs(s.ctx, slog.LevelDebug, s.stepName+" completed", attrs...)
+	}, extra...)
+	logAttrsSkip(s.ctx, 3, slog.LevelDebug, s.stepName+" completed", attrs...)
 }
 
-// Fail는 작업 단계의 실패를 기록합니다.
 func (s *StepTimer) Fail(err error, extra ...slog.Attr) {
 	if s == nil {
 		return
@@ -300,6 +329,7 @@ func (s *StepTimer) Fail(err error, extra ...slog.Attr) {
 	durationMs := time.Since(s.startAt).Milliseconds()
 	metrics.RecordStepFinished(s.stepName, "failed", durationMs)
 	attrs := []slog.Attr{
+		slog.String("component", s.component),
 		slog.String("category", CategoryJobStep),
 		slog.String("eventType", EventStepFailed),
 		slog.String("jobId", s.jobID),
@@ -309,20 +339,17 @@ func (s *StepTimer) Fail(err error, extra ...slog.Attr) {
 	if err != nil {
 		attrs = append(attrs, errorAttr(err))
 	}
-	attrs = append(attrs, extra...)
-	logAttrs(s.ctx, slog.LevelError, s.stepName+" failed", attrs...)
+	logAttrsSkip(s.ctx, 3, slog.LevelError, s.stepName+" failed", append(attrs, extra...)...)
 }
 
-// ============================================================
-// WORKER 이벤트 (부트/셧다운 등)
-// ============================================================
+// ── Worker events ─────────────────────────────────────────────────────────────
 
-func WorkerEvent(ctx context.Context, eventType, msg string, extra ...slog.Attr) {
+func (c *ComponentLogger) WorkerEvent(ctx context.Context, eventType, msg string, extra ...slog.Attr) {
 	metrics.RecordWorkerEvent(eventType)
-	attrs := []slog.Attr{
+	attrs := append([]slog.Attr{
+		c.compAttr(),
 		slog.String("category", CategoryWorker),
 		slog.String("eventType", eventType),
-	}
-	attrs = append(attrs, extra...)
-	logAttrs(ctx, slog.LevelInfo, msg, attrs...)
+	}, extra...)
+	logAttrsSkip(ctx, 3, slog.LevelInfo, msg, attrs...)
 }

@@ -19,7 +19,7 @@ import (
 	"worker_GoVer/db"
 	"worker_GoVer/disk"
 	"worker_GoVer/git"
-	"worker_GoVer/logger"
+	"worker_GoVer/keyword"
 	"worker_GoVer/quest"
 	"worker_GoVer/s3"
 )
@@ -37,7 +37,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	}
 
 	jobID := base.JobID
-	logger.AnalysisStarted(ctx, jobID,
+	log.AnalysisStarted(ctx, jobID,
 		slog.String("analysisType", "FULL_SCAN_ANALYSIS_REQUEST"),
 		slog.String("repo", msg.RepositoryFullName),
 		slog.String("branch", msg.BranchName),
@@ -55,21 +55,21 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	jobClaimed := false
 
 	fail := func(err error) error {
-		logger.AnalysisFailed(ctx, jobID, err, time.Since(startAt).Milliseconds(),
+		log.AnalysisFailed(ctx, jobID, err, time.Since(startAt).Milliseconds(),
 			slog.String("analysisType", "FULL_SCAN_ANALYSIS_REQUEST"),
 			slog.String("repo", msg.RepositoryFullName),
 		)
 		rb.Run(ctx)
 		if jobClaimed {
 			if dbErr := db.UpdateAnalysisJobStatus(jobIDInt, "NOTIFICATION_QUEUED"); dbErr != nil {
-				logger.Warn(ctx, "rollback: failed to mark job as NOTIFICATION_QUEUED", slog.String("reason", dbErr.Error()))
+				log.Warn(ctx, "rollback: failed to mark job as NOTIFICATION_QUEUED", dbErr)
 			}
 		}
 		return err
 	}
 
 	// 1. job 선점: ANALYSIS_JOB_QUEUED → ANALYSIS_JOB_RUNNING
-	claimStep := logger.StepStart(ctx, "job.claim", jobID)
+	claimStep := log.StepStart(ctx, "job.claim", jobID)
 	ok, err := db.ClaimAnalysisJob(jobIDInt)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "failed to claim job jobId=%s", jobID)
@@ -78,17 +78,17 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	}
 	if !ok {
 		claimStep.Complete(slog.String("status", "skipped"))
-		logger.Warn(ctx, "analysis job already claimed, skipping")
+		log.Warn(ctx, "analysis job already claimed, skipping", nil)
 		return nil, nil
 	}
 	claimStep.Complete()
 	jobClaimed = true
 
 	// 2. 디스크 정리
-	cleanupStep := logger.StepStart(ctx, "workspace.cleanup", jobID)
+	cleanupStep := log.StepStart(ctx, "workspace.cleanup", jobID)
 	if err := disk.IfNeedDoCleanWorkspace(ctx); err != nil {
 		cleanupStep.Fail(err)
-		logger.Warn(ctx, "workspace cleanup warning", slog.String("reason", err.Error()))
+		log.Warn(ctx, "workspace cleanup warning", err)
 	} else {
 		cleanupStep.Complete()
 	}
@@ -100,7 +100,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	)
 
 	// 4. clone or fetch
-	repoStep := logger.StepStart(ctx, "git.prepare", jobID, slog.String("localPath", localPath))
+	repoStep := log.StepStart(ctx, "git.prepare", jobID, slog.String("localPath", localPath))
 	exists, err := disk.IsExistDir(ctx, localPath)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to check dir")
@@ -123,7 +123,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	repoStep.Complete(slog.Bool("exists", exists))
 
 	// 5. 브랜치 체크아웃
-	checkoutStep := logger.StepStart(ctx, "git.checkout_branch", jobID, slog.String("branch", msg.BranchName))
+	checkoutStep := log.StepStart(ctx, "git.checkout_branch", jobID, slog.String("branch", msg.BranchName))
 	if err := git.CheckoutBranch(ctx, localPath, msg.BranchName); err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrGitOperation, 500, true, err, "failed to checkout branch=%s", msg.BranchName)
 		checkoutStep.Fail(wrapped)
@@ -132,7 +132,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	checkoutStep.Complete()
 
 	// 6. lock
-	lockStep := logger.StepStart(ctx, "workspace.lock", jobID)
+	lockStep := log.StepStart(ctx, "workspace.lock", jobID)
 	locked, err := disk.IsLocked(ctx, localPath)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrWorkspaceLocked, 500, true, err, "failed to check lock jobId=%s", jobID)
@@ -152,12 +152,12 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	lockStep.Complete()
 	defer func() {
 		if err := disk.RemoveLockAtomic(ctx, localPath); err != nil {
-			logger.Warn(ctx, "failed to remove workspace lock", slog.String("reason", err.Error()))
+			log.Warn(ctx, "failed to remove workspace lock", err)
 		}
 	}()
 
 	// 7. CodeGraph 생성
-	graphStep := logger.StepStart(ctx, "codegraph.generate", jobID)
+	graphStep := log.StepStart(ctx, "codegraph.generate", jobID)
 	graphPath, err := codeGraph.GenerateCodeGraph(ctx, localPath)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrCodeGraphGeneration, 500, true, err, "failed to generate code graph repo=%s", msg.RepositoryFullName)
@@ -167,7 +167,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	graphStep.Complete()
 
 	// 8. CodeContent 생성
-	contentStep := logger.StepStart(ctx, "codecontent.generate", jobID)
+	contentStep := log.StepStart(ctx, "codecontent.generate", jobID)
 	graphData, err := os.ReadFile(graphPath)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrCodeGraphGeneration, 500, true, err, "failed to read code graph")
@@ -191,10 +191,10 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	// 9. ProjectContext 생성
 	ctxVersion, err := db.NextReportVersion(msg.ProjectID, "PROJECT_KB")
 	if err != nil {
-		logger.Warn(ctx, "failed to get project context version, defaulting to 1", slog.String("reason", err.Error()))
+		log.Warn(ctx, "failed to get project context version, defaulting to 1", err)
 		ctxVersion = 1
 	}
-	projectContextStep := logger.StepStart(ctx, "project_context.generate", jobID, slog.Int("version", ctxVersion))
+	projectContextStep := log.StepStart(ctx, "project_context.generate", jobID, slog.Int("version", ctxVersion))
 	ctxPath, err := projectContext.GenerateProjectContext(ctx, localPath, graphPath, contentPath, ctxVersion, projectMeta)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrAIAnalysis, 500, true, err, "failed to generate project context")
@@ -205,14 +205,13 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 
 	// 10. ProjectContext S3 업로드 + DB 저장
 	result := &StrategyResult{}
-	persistStep := logger.StepStart(ctx, "project_context.persist", jobID, slog.Int("version", ctxVersion))
+	persistStep := log.StepStart(ctx, "project_context.persist", jobID, slog.Int("version", ctxVersion))
 	kbID, kbURL, err := projectContext.Persist(ctx, ctxPath, nil, msg.InstallationID, msg.RepositoryID, msg.ProjectID, ctxVersion, cfg.AWSS3Bucket, "", "")
 	if err != nil {
 		persistStep.Fail(err)
-		// S3 업로드는 성공했지만 DB 실패인 경우 S3 오브젝트를 즉시 정리
 		if kbURL != "" {
 			if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, kbURL); delErr != nil {
-				logger.Warn(ctx, "rollback: failed to delete orphaned PROJECT_KB from S3", slog.String("reason", delErr.Error()))
+				log.Warn(ctx, "rollback: failed to delete orphaned PROJECT_KB from S3", delErr)
 			}
 		}
 		return nil, fail(apperrors.Newf(apperrors.ErrS3Operation, 500, true, err, "failed to persist project context"))
@@ -221,15 +220,15 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	persistStep.Complete(slog.Int64("projectKbId", kbID))
 	rb.Add(func() {
 		if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, kbURL); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete PROJECT_KB from S3", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete PROJECT_KB from S3", delErr)
 		}
 		if delErr := db.DeleteAnalysisReport(kbID); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete PROJECT_KB report from DB", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete PROJECT_KB report from DB", delErr)
 		}
 	})
 
 	// 11. RoadMap AI 생성 (DB replace는 user view 저장 이후 수행)
-	roadMapStep := logger.StepStart(ctx, "roadmap.generate", jobID)
+	roadMapStep := log.StepStart(ctx, "roadmap.generate", jobID)
 	roadMapPlan, err := roadmap.Generate(ctx, roadmap.GenerateInput{
 		ProjectID:          msg.ProjectID,
 		UserID:             base.UserID,
@@ -250,7 +249,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	)
 
 	// 12. Quest 평가 및 생성
-	questStep := logger.StepStart(ctx, "quest.generate", jobID)
+	questStep := log.StepStart(ctx, "quest.generate", jobID)
 	questReq, err := quest.BuildQuestRequest(ctx, jobIDInt, msg.ProjectID, base.UserID, msg.ProjectTitle, msg.ProjectDescription, msg.ProjectGoal, msg.RepositoryFullName, msg.BranchName)
 	if err != nil {
 		questStep.Fail(err)
@@ -266,13 +265,13 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	result.CompleteQuestIDs, result.NewQuestIDs, questMilestoneLinks = quest.SaveResults(ctx, jobIDInt, msg.ProjectID, base.UserID, questReq, questResp)
 	rb.Add(func() {
 		if delErr := db.DeleteQuestEvaluationsByJobID(jobIDInt); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete quest evaluations", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete quest evaluations", delErr)
 		}
 		if delErr := db.DeleteQuestsByIDs(result.NewQuestIDs); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete new quests", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete new quests", delErr)
 		}
 		if delErr := db.RevertQuestCompletion(result.CompleteQuestIDs); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to revert quest completion", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to revert quest completion", delErr)
 		}
 	})
 	questStep.Complete(
@@ -283,7 +282,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	// 13. UserView 생성
 	uvVersion, err := db.NextReportVersion(msg.ProjectID, "USER_VIEW")
 	if err != nil {
-		logger.Warn(ctx, "failed to get user view version, defaulting to 1", slog.String("reason", err.Error()))
+		log.Warn(ctx, "failed to get user view version, defaulting to 1", err)
 		uvVersion = 1
 	}
 	uvInput := userView.GenerateInput{
@@ -296,7 +295,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 		BranchName:         msg.BranchName,
 		Version:            uvVersion,
 	}
-	userViewStep := logger.StepStart(ctx, "user_view.generate", jobID, slog.Int("version", uvVersion))
+	userViewStep := log.StepStart(ctx, "user_view.generate", jobID, slog.Int("version", uvVersion))
 	uvPath, err := userView.Generate(ctx, uvInput, ctxPath, localPath)
 	if err != nil {
 		userViewStep.Fail(err)
@@ -307,7 +306,7 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 		userViewStep.Fail(err)
 		if uvURL != "" {
 			if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, uvURL); delErr != nil {
-				logger.Warn(ctx, "rollback: failed to delete orphaned USER_VIEW from S3", slog.String("reason", delErr.Error()))
+				log.Warn(ctx, "rollback: failed to delete orphaned USER_VIEW from S3", delErr)
 			}
 		}
 		return nil, fail(apperrors.Newf(apperrors.ErrS3Operation, 500, true, err, "failed to persist user view"))
@@ -316,15 +315,15 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 	userViewStep.Complete(slog.Int64("userViewReportId", uvID))
 	rb.Add(func() {
 		if delErr := s3.DeleteObject(ctx, cfg.AWSS3Bucket, uvURL); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete USER_VIEW from S3", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete USER_VIEW from S3", delErr)
 		}
 		if delErr := db.DeleteAnalysisReport(uvID); delErr != nil {
-			logger.Warn(ctx, "rollback: failed to delete USER_VIEW report from DB", slog.String("reason", delErr.Error()))
+			log.Warn(ctx, "rollback: failed to delete USER_VIEW report from DB", delErr)
 		}
 	})
 
 	// 14. RoadMap DB replace + 신규 퀘스트 milestone 연결
-	roadMapPersistStep := logger.StepStart(ctx, "roadmap.persist", jobID)
+	roadMapPersistStep := log.StepStart(ctx, "roadmap.persist", jobID)
 	roadMapSaveResult, err := roadmap.Persist(ctx, msg.ProjectID, roadMapPlan, questMilestoneLinks)
 	if err != nil {
 		wrapped := apperrors.Newf(apperrors.ErrDBOperation, 500, true, err, "failed to persist roadmap")
@@ -338,25 +337,34 @@ func (s FullScanStrategy) Handle(ctx context.Context, base SqsBaseMessage) (*Str
 		slog.Int("skippedQuestLinkCount", len(roadMapSaveResult.SkippedQuestLinks)),
 	)
 
-	// 15. touch 파일 업데이트
-	touchStep := logger.StepStart(ctx, "workspace.touch", jobID)
+	// 15. 검색 키워드 추출
+	kwStep := log.StepStart(ctx, "keyword.extract", jobID)
+	if err := keyword.ExtractAndSave(ctx, jobIDInt, msg.ProjectID, ctxPath); err != nil {
+		kwStep.Fail(err)
+		log.Warn(ctx, "keyword extraction failed, skipping", err)
+	} else {
+		kwStep.Complete()
+	}
+
+	// 16. touch 파일 업데이트
+	touchStep := log.StepStart(ctx, "workspace.touch", jobID)
 	if _, err := disk.CreateTouchFileAtomic(ctx, localPath); err != nil {
 		touchStep.Fail(err)
-		logger.Warn(ctx, "failed to update touch file", slog.String("reason", err.Error()))
+		log.Warn(ctx, "failed to update touch file", err)
 	} else {
 		touchStep.Complete()
 	}
 
-	// 16. 작업 완료
-	statusStep := logger.StepStart(ctx, "job.complete", jobID)
+	// 17. 작업 완료
+	statusStep := log.StepStart(ctx, "job.complete", jobID)
 	if err := db.UpdateAnalysisJobStatus(jobIDInt, "ANALYSIS_JOB_COMPLETED"); err != nil {
 		statusStep.Fail(err)
-		logger.Warn(ctx, "failed to update analysis job status to completed", slog.String("reason", err.Error()))
+		log.Warn(ctx, "failed to update analysis job status to completed", err)
 	} else {
 		statusStep.Complete()
 	}
 
-	logger.AnalysisCompleted(ctx, jobID, time.Since(startAt).Milliseconds(),
+	log.AnalysisCompleted(ctx, jobID, time.Since(startAt).Milliseconds(),
 		slog.String("analysisType", "FULL_SCAN_ANALYSIS_REQUEST"),
 		slog.String("repo", msg.RepositoryFullName),
 	)

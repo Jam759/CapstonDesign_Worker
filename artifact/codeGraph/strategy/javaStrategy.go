@@ -9,13 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"worker_GoVer/logger"
 )
-
-// logfJ는 java strategy 내부 상세 로그용 헬퍼입니다.
-func logfJ(format string, args ...any) {
-	logger.Info(context.Background(), fmt.Sprintf(format, args...), slog.String("component", "codeGraph/java"))
-}
 
 var (
 	reJavaPackage    = regexp.MustCompile(`^\s*package\s+([\w.]+)\s*;`)
@@ -42,9 +36,9 @@ func (j JavaStrategy) SupportedExtensions() []string {
 	return []string{".java"}
 }
 
-func (j JavaStrategy) Analyze(projectPath string) (*CodeGraph, error) {
+func (j JavaStrategy) Analyze(ctx context.Context, projectPath string) (*CodeGraph, error) {
 	graph := &CodeGraph{Language: "java"}
-	logfJ("[JavaStrategy] start analyzing: %s", projectPath)
+	log.Trace(ctx, "java analysis start", slog.String("path", projectPath))
 
 	fileCount := 0
 	err := filepath.Walk(projectPath, func(path string, info os.FileInfo, err error) error {
@@ -55,7 +49,7 @@ func (j JavaStrategy) Analyze(projectPath string) (*CodeGraph, error) {
 			name := info.Name()
 			if name == ".git" || name == "artifact" || name == "build" ||
 				name == "target" || name == ".gradle" || name == "node_modules" {
-				logfJ("[JavaStrategy] skip dir: %s", path)
+				log.Trace(ctx, "java skip dir", slog.String("path", path))
 				return filepath.SkipDir
 			}
 			return nil
@@ -64,8 +58,8 @@ func (j JavaStrategy) Analyze(projectPath string) (*CodeGraph, error) {
 			return nil
 		}
 		relPath, _ := filepath.Rel(projectPath, path)
-		logfJ("[JavaStrategy] parsing: %s", relPath)
-		j.parseFile(graph, path, relPath)
+		log.Trace(ctx, "java parsing file", slog.String("file", relPath))
+		j.parseFile(ctx, graph, path, relPath)
 		fileCount++
 		return nil
 	})
@@ -73,21 +67,25 @@ func (j JavaStrategy) Analyze(projectPath string) (*CodeGraph, error) {
 		return nil, fmt.Errorf("failed to walk project: %w", err)
 	}
 
-	logfJ("[JavaStrategy] done: files=%d nodes=%d edges=%d imports=%d",
-		fileCount, len(graph.Nodes), len(graph.Edges), len(graph.Imports))
+	log.Trace(ctx, "java analysis done",
+		slog.Int("files", fileCount),
+		slog.Int("nodes", len(graph.Nodes)),
+		slog.Int("edges", len(graph.Edges)),
+		slog.Int("imports", len(graph.Imports)),
+	)
 	return graph, nil
 }
 
 type javaClassCtx struct {
 	name      string
 	nodeID    string
-	bodyDepth int // { 이후 depth
+	bodyDepth int
 }
 
-func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
+func (j JavaStrategy) parseFile(ctx context.Context, graph *CodeGraph, absPath, relPath string) {
 	f, err := os.Open(absPath)
 	if err != nil {
-		logfJ("[JavaStrategy] failed to open file %s: %v", relPath, err)
+		log.Warn(ctx, "java failed to open file", err, slog.String("file", relPath))
 		return
 	}
 	defer f.Close()
@@ -109,7 +107,6 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 		lineNum := i + 1
 		trimmed := strings.TrimSpace(line)
 
-		// 블록 주석 처리
 		if inBlockComment {
 			if strings.Contains(line, "*/") {
 				inBlockComment = false
@@ -124,7 +121,6 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 		}
 
 		startDepth := depth
-		// brace 카운트 (문자열 리터럴 무시 근사치)
 		inStr := false
 		inChar := false
 		for k := 0; k < len(line); k++ {
@@ -142,17 +138,14 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 			}
 		}
 
-		// 클래스 스택 정리
 		for len(classStack) > 0 && depth < classStack[len(classStack)-1].bodyDepth {
 			classStack = classStack[:len(classStack)-1]
 		}
-		// 메서드 스택 정리
 		if currentMethodDepth >= 0 && depth <= currentMethodDepth {
 			currentMethodID = ""
 			currentMethodDepth = -1
 		}
 
-		// package
 		if pkgName == "" {
 			if m := reJavaPackage.FindStringSubmatch(line); m != nil {
 				pkgName = m[1]
@@ -160,7 +153,6 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 			}
 		}
 
-		// import
 		if m := reJavaImport.FindStringSubmatch(line); m != nil {
 			graph.Imports = append(graph.Imports, Import{
 				FilePath:   relPath,
@@ -169,7 +161,6 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 			continue
 		}
 
-		// class / interface / enum / record
 		if m := reJavaClassDecl.FindStringSubmatch(line); m != nil {
 			className := m[1]
 			if javaKeywords[className] {
@@ -195,7 +186,12 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 				kind = "record"
 			}
 
-			logfJ("[JavaStrategy] %s: %s (line %d) in %s", kind, className, lineNum, relPath)
+			log.Trace(ctx, "java found class",
+				slog.String("kind", kind),
+				slog.String("class", className),
+				slog.Int("line", lineNum),
+				slog.String("file", relPath),
+			)
 
 			graph.Nodes = append(graph.Nodes, Node{
 				ID:       nodeID,
@@ -203,11 +199,10 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 				Kind:     kind,
 				FilePath: relPath,
 				Line:     lineNum,
-				EndLine:  lineNum, // 정확한 endLine은 추적 생략
+				EndLine:  lineNum,
 				Package:  pkgName,
 			})
 
-			// extends edge
 			if em := reJavaExtends.FindStringSubmatch(line); em != nil {
 				graph.Edges = append(graph.Edges, Edge{
 					From:     nodeID,
@@ -215,7 +210,6 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 					Relation: "implements",
 				})
 			}
-			// implements edge
 			if im := reJavaImplements.FindStringSubmatch(line); im != nil {
 				for _, iface := range strings.Split(im[1], ",") {
 					iface = strings.TrimSpace(iface)
@@ -237,7 +231,6 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 			continue
 		}
 
-		// method (클래스 body 바로 안, startDepth == classBodyDepth)
 		if len(classStack) > 0 && startDepth == classStack[len(classStack)-1].bodyDepth {
 			if m := reJavaMethodDecl.FindStringSubmatch(line); m != nil {
 				methodName := m[1]
@@ -250,7 +243,11 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 						kind = "function"
 					}
 
-					logfJ("[JavaStrategy] method: %s (line %d) in %s", methodName, lineNum, relPath)
+					log.Trace(ctx, "java found method",
+						slog.String("method", methodName),
+						slog.Int("line", lineNum),
+						slog.String("file", relPath),
+					)
 
 					graph.Nodes = append(graph.Nodes, Node{
 						ID:       nodeID,
@@ -273,7 +270,6 @@ func (j JavaStrategy) parseFile(graph *CodeGraph, absPath, relPath string) {
 		}
 
 	callCheck:
-		// 메서드 내 call edge
 		if currentMethodID != "" {
 			matches := reJavaCall.FindAllStringSubmatch(line, -1)
 			for _, cm := range matches {

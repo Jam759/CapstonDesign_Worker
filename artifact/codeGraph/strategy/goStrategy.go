@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -14,7 +15,7 @@ func (g GoStrategy) SupportedExtensions() []string {
 	return []string{".go"}
 }
 
-func (g GoStrategy) Analyze(projectPath string) (*CodeGraph, error) {
+func (g GoStrategy) Analyze(_ context.Context, projectPath string) (*CodeGraph, error) {
 	graph := &CodeGraph{
 		Language: "go",
 	}

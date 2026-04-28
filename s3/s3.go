@@ -17,7 +17,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
-var client *s3.Client
+var (
+	client *s3.Client
+	log    = logger.WithComponent("s3")
+)
 
 func Init() error {
 	cfg := config.Get()
@@ -60,7 +63,7 @@ func DownloadProjectKB(ctx context.Context, bucket string, storedURL string, des
 	key := storedURL[idx+len(sep):]
 	fileName := filepath.Base(key)
 
-	logger.Info(ctx, "S3 download start", slog.String("key", key), slog.String("bucket", bucket))
+	log.Trace(ctx, "S3 download start", slog.String("key", key), slog.String("bucket", bucket))
 
 	resp, err := client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(bucket),
@@ -86,7 +89,7 @@ func DownloadProjectKB(ctx context.Context, bucket string, storedURL string, des
 		return "", fmt.Errorf("failed to write downloaded file: %w", err)
 	}
 
-	logger.Info(ctx, "S3 download done", slog.String("destPath", destPath))
+	log.Trace(ctx, "S3 download done", slog.String("destPath", destPath))
 	return destPath, nil
 }
 
@@ -100,20 +103,20 @@ func DeleteObject(ctx context.Context, bucket string, storedURL string) error {
 	}
 	key := storedURL[idx+len(sep):]
 
-	logger.Info(ctx, "S3 delete start", slog.String("key", key))
+	log.Trace(ctx, "S3 delete start", slog.String("key", key))
 	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
 	}); err != nil {
 		return fmt.Errorf("failed to delete S3 object key=%s: %w", key, err)
 	}
-	logger.Info(ctx, "S3 delete done", slog.String("key", key))
+	log.Trace(ctx, "S3 delete done", slog.String("key", key))
 	return nil
 }
 
 func upload(ctx context.Context, key string, localFilePath string) (string, error) {
 	cfg := config.Get()
-	logger.Info(ctx, "S3 upload start", slog.String("key", key))
+	log.Trace(ctx, "S3 upload start", slog.String("key", key))
 
 	f, err := os.Open(localFilePath)
 	if err != nil {
@@ -131,6 +134,6 @@ func upload(ctx context.Context, key string, localFilePath string) (string, erro
 	}
 
 	url := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", cfg.AWSS3Bucket, cfg.AWSRegion, key)
-	logger.Info(ctx, "S3 upload done", slog.String("url", url))
+	log.Trace(ctx, "S3 upload done", slog.String("url", url))
 	return url, nil
 }
